@@ -109,6 +109,13 @@ export async function leaveRoom(roomId: string) {
     throw new Error('未登录');
   }
 
+  // 更新last_seen时间
+  await supabase
+    .from('room_members')
+    .update({ last_seen: new Date().toISOString() })
+    .eq('room_id', roomId)
+    .eq('user_id', user.user.id);
+
   const { error } = await supabase
     .from('room_members')
     .delete()
@@ -168,6 +175,22 @@ export async function isUserInRoom(roomId: string): Promise<boolean> {
 
   if (error) return false;
   return !!data;
+}
+
+// 获取用户在房间的最后查看时间
+export async function getUserLastSeen(roomId: string): Promise<string | null> {
+  const { data: user } = await supabase.auth.getUser();
+  if (!user.user) return null;
+
+  const { data, error } = await supabase
+    .from('room_members')
+    .select('last_seen')
+    .eq('room_id', roomId)
+    .eq('user_id', user.user.id)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data.last_seen;
 }
 
 // ==================== 消息相关 ====================

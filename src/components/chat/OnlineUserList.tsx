@@ -9,7 +9,7 @@ interface OnlineUserListProps {
 
 export function OnlineUserList({ members, creatorId }: OnlineUserListProps) {
   return (
-    <div className="w-64 border-l border-border bg-card flex flex-col">
+    <div className="flex flex-col h-full">
       <div className="p-4 border-b border-border">
         <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <Users className="h-4 w-4" />

@@ -52,7 +52,7 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
             // 监管警告消息居中显示
             if (isWarning) {
               return (
-                <div key={message.id} className="flex justify-center">
+                <div key={message.id} data-message-id={message.id} className="flex justify-center">
                   <div className="max-w-[80%] flex flex-col items-center gap-1">
                     <div className="flex items-center gap-2 text-xs text-destructive">
                       <ShieldAlert className="h-3.5 w-3.5" />
@@ -70,6 +70,7 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
             return (
               <div
                 key={message.id}
+                data-message-id={message.id}
                 className={`flex ${isOwn && !isAI ? 'justify-end' : 'justify-start'}`}
               >
                 <div className={`max-w-[70%] ${isOwn && !isAI ? 'items-end' : 'items-start'} flex flex-col gap-1`}>

@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, Trash2 } from 'lucide-react';
+import { ArrowLeft, Trash2, Loader2 } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,12 +22,21 @@ import {
   leaveRoom,
   deleteRoom,
   isUserInRoom,
+  getUserLastSeen,
 } from '@/db/api';
 import { supabase } from '@/db/supabase';
 import type { Room, RoomMember, Message } from '@/types/types';
 import { MessageList } from '@/components/chat/MessageList';
 import { MessageInput } from '@/components/chat/MessageInput';
 import { OnlineUserList } from '@/components/chat/OnlineUserList';
+import { MessageSummary } from '@/components/chat/MessageSummary';
+
+interface SummaryData {
+  summary: string;
+  unreadCount: number;
+  hasUnread: boolean;
+  firstUnreadTime?: string;
+}
 
 export default function ChatRoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -37,6 +46,51 @@ export default function ChatRoomPage() {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
+  const [summaryData, setSummaryData] = useState<SummaryData | null>(null);
+  const [showSummary, setShowSummary] = useState(false);
+  const [loadingSummary, setLoadingSummary] = useState(false);
+  const messageListRef = useRef<HTMLDivElement>(null);
+
+  // 生成消息摘要
+  const generateSummary = async (lastSeen: string) => {
+    if (!roomId || !user?.id) return;
+
+    setLoadingSummary(true);
+    try {
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+      const response = await fetch(`${supabaseUrl}/functions/v1/message-summary`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'apikey': supabaseAnonKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          roomId,
+          userId: user.id,
+          lastSeen
+        })
+      });
+
+      if (!response.ok) {
+        console.error('生成摘要失败:', response.statusText);
+        return;
+      }
+
+      const result: SummaryData = await response.json();
+      
+      if (result.hasUnread && result.summary) {
+        setSummaryData(result);
+        setShowSummary(true);
+      }
+    } catch (error) {
+      console.error('调用摘要API失败:', error);
+    } finally {
+      setLoadingSummary(false);
+    }
+  };
 
   const loadRoomData = async () => {
     if (!roomId) return;
@@ -49,6 +103,9 @@ export default function ChatRoomPage() {
       return;
     }
 
+    // 获取用户最后查看时间
+    const lastSeen = await getUserLastSeen(roomId);
+    
     const [roomData, membersData, messagesData] = await Promise.all([
       getRoomById(roomId),
       getRoomMembers(roomId),
@@ -59,6 +116,17 @@ export default function ChatRoomPage() {
     setMembers(membersData);
     setMessages(messagesData);
     setLoading(false);
+
+    // 检查是否需要生成摘要（离线超过10分钟）
+    if (lastSeen) {
+      const lastSeenTime = new Date(lastSeen).getTime();
+      const now = new Date().getTime();
+      const diffMinutes = (now - lastSeenTime) / (1000 * 60);
+      
+      if (diffMinutes > 10) {
+        await generateSummary(lastSeen);
+      }
+    }
   };
 
   useEffect(() => {
@@ -151,6 +219,31 @@ export default function ChatRoomPage() {
     }
   };
 
+  // 滚动到未读消息位置
+  const handleViewDetails = () => {
+    if (!summaryData?.firstUnreadTime) return;
+    
+    // 找到第一条未读消息的索引
+    const firstUnreadIndex = messages.findIndex(
+      msg => new Date(msg.created_at).getTime() >= new Date(summaryData.firstUnreadTime!).getTime()
+    );
+    
+    if (firstUnreadIndex !== -1) {
+      // 滚动到该消息
+      const messageElements = document.querySelectorAll('[data-message-id]');
+      if (messageElements[firstUnreadIndex]) {
+        messageElements[firstUnreadIndex].scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+    
+    // 关闭摘要面板
+    setShowSummary(false);
+  };
+
+  const handleCloseSummary = () => {
+    setShowSummary(false);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -226,8 +319,34 @@ export default function ChatRoomPage() {
           <MessageInput roomId={roomId || ''} room={room} />
         </div>
 
-        {/* 在线用户列表 */}
-        <OnlineUserList members={members} creatorId={room.creator_id} />
+        {/* 右侧边栏 */}
+        <div className="w-80 border-l border-border bg-card flex flex-col">
+          {/* 摘要面板 */}
+          {loadingSummary && (
+            <div className="p-4 border-b border-border">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>正在生成消息摘要...</span>
+              </div>
+            </div>
+          )}
+          
+          {showSummary && summaryData && (
+            <div className="p-4 border-b border-border">
+              <MessageSummary
+                summary={summaryData.summary}
+                unreadCount={summaryData.unreadCount}
+                onViewDetails={handleViewDetails}
+                onClose={handleCloseSummary}
+              />
+            </div>
+          )}
+
+          {/* 在线用户列表 */}
+          <div className="flex-1 overflow-hidden">
+            <OnlineUserList members={members} creatorId={room.creator_id} />
+          </div>
+        </div>
       </div>
     </div>
   );

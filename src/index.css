@@ -73,3 +73,9 @@ All colors MUST be HSL.
     @apply bg-background text-foreground;
   }
 }
+
+/* Remove Miaoda watermark */
+[class*="miaoda"], [id*="miaoda"], .watermark {
+  display: none !important;
+}
+

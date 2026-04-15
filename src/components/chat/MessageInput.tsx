@@ -6,7 +6,8 @@ import { toast } from 'sonner';
 import { sendMessage, getRoomMessages } from '@/db/api';
 import { sendStreamRequest } from '@/lib/sse';
 import { supabase } from '@/db/supabase';
-import type { Room } from '@/types/types';
+import { useAuth } from '@/contexts/AuthContext';
+import type { Room, ModerationResult } from '@/types/types';
 
 interface MessageInputProps {
   roomId: string;
@@ -14,9 +15,53 @@ interface MessageInputProps {
 }
 
 export function MessageInput({ roomId, room }: MessageInputProps) {
+  const { user } = useAuth();
   const [content, setContent] = useState('');
   const [sending, setSending] = useState(false);
   const [aiGenerating, setAiGenerating] = useState(false);
+
+  // 内容审核
+  const moderateContent = async (content: string): Promise<ModerationResult> => {
+    try {
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+      const response = await fetch(`${supabaseUrl}/functions/v1/content-moderation`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'apikey': supabaseAnonKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          content,
+          roomId,
+          userId: user?.id
+        })
+      });
+
+      if (!response.ok) {
+        console.error('内容审核失败:', response.statusText);
+        return { isSafe: true }; // 审核失败时默认允许
+      }
+
+      const result: ModerationResult = await response.json();
+      return result;
+    } catch (error) {
+      console.error('调用审核API失败:', error);
+      return { isSafe: true }; // 出错时默认允许
+    }
+  };
+
+  // 发送监管警告消息
+  const sendWarningMessage = async (violationType: string, warningMessage?: string) => {
+    const warningText = `⚠️ 系统监管提醒：检测到您的消息包含${violationType}内容，请注意文明用语，遵守社区规范。${warningMessage ? `（${warningMessage}）` : ''}`;
+    try {
+      await sendMessage(roomId, warningText, true, true);
+    } catch (error) {
+      console.error('发送警告消息失败:', error);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,13 +76,31 @@ export function MessageInput({ roomId, room }: MessageInputProps) {
       return;
     }
 
-    // 检查是否@了AI机器人
-    const botName = room?.bot_name;
-    const isAtBot = botName && content.includes(`@${botName}`);
-
     setSending(true);
     try {
-      // 先发送用户消息
+      // 先进行内容审核
+      const moderationResult = await moderateContent(content);
+
+      if (!moderationResult.isSafe) {
+        // 检测到敏感内容，阻止发送
+        toast.error(`消息包含${moderationResult.violationType || '敏感'}内容，无法发送`);
+        
+        // AI监管发送警告
+        await sendWarningMessage(
+          moderationResult.violationType || '敏感',
+          moderationResult.warningMessage
+        );
+        
+        setContent('');
+        setSending(false);
+        return;
+      }
+
+      // 检查是否@了AI机器人
+      const botName = room?.bot_name;
+      const isAtBot = botName && content.includes(`@${botName}`);
+
+      // 发送用户消息
       await sendMessage(roomId, content);
       const userMessage = content;
       setContent('');

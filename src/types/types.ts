@@ -35,6 +35,15 @@ export interface Message {
   user_id: string;
   content: string;
   is_ai?: boolean;
+  is_warning?: boolean;
   created_at: string;
   profile?: Profile;
+}
+
+// 内容审核结果
+export interface ModerationResult {
+  isSafe: boolean;
+  violationType?: string;
+  warningMessage?: string;
+  error?: string;
 }

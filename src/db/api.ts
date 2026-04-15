@@ -193,7 +193,7 @@ export async function getRoomMessages(roomId: string, limit = 50): Promise<Messa
 }
 
 // 发送消息
-export async function sendMessage(roomId: string, content: string, isAi: boolean = false) {
+export async function sendMessage(roomId: string, content: string, isAi: boolean = false, isWarning: boolean = false) {
   const { data: user } = await supabase.auth.getUser();
   if (!user.user) {
     throw new Error('未登录');
@@ -215,6 +215,7 @@ export async function sendMessage(roomId: string, content: string, isAi: boolean
       user_id: user.user.id,
       content: trimmedContent,
       is_ai: isAi,
+      is_warning: isWarning,
     });
 
   if (error) throw error;

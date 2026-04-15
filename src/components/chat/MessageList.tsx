@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Bot } from 'lucide-react';
+import { Bot, ShieldAlert } from 'lucide-react';
 import type { Message } from '@/types/types';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -47,6 +47,25 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
           messages.map((message) => {
             const isOwn = message.user_id === currentUserId;
             const isAI = message.is_ai;
+            const isWarning = message.is_warning;
+            
+            // 监管警告消息居中显示
+            if (isWarning) {
+              return (
+                <div key={message.id} className="flex justify-center">
+                  <div className="max-w-[80%] flex flex-col items-center gap-1">
+                    <div className="flex items-center gap-2 text-xs text-destructive">
+                      <ShieldAlert className="h-3.5 w-3.5" />
+                      <span>系统监管</span>
+                      <span>{formatTime(message.created_at)}</span>
+                    </div>
+                    <div className="px-4 py-2 rounded border border-destructive/50 bg-destructive/10 text-destructive">
+                      <p className="text-sm break-words whitespace-pre-wrap text-center">{message.content}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
             
             return (
               <div

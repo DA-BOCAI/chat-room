@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Bot, ShieldAlert } from 'lucide-react';
 import type { Message } from '@/types/types';
 import { format } from 'date-fns';
@@ -17,23 +16,34 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
   const isInitialLoadRef = useRef<boolean>(true);
 
   useEffect(() => {
-    // 只在有新消息时滚动到底部，初始加载时不滚动
     if (scrollRef.current) {
       const isNewMessage = messages.length > prevMessagesLengthRef.current;
+      const scrollContainer = scrollRef.current;
       
-      if (isNewMessage && !isInitialLoadRef.current) {
-        // 有新消息且不是初始加载，滚动到底部
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      }
-      
-      // 标记初始加载完成
+      // 1. 初始加载：定位到最新消息（底部）
       if (isInitialLoadRef.current && messages.length > 0) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
         isInitialLoadRef.current = false;
+      } 
+      // 2. 后续更新：智能滚动
+      else if (isNewMessage) {
+        // 检查用户是否接近底部（阈值100px）
+        const isAtBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 100;
+        
+        // 获取最后一条消息
+        const lastMessage = messages[messages.length - 1];
+        // 如果是用户自己发送的消息，或者是原本就在底部，则滚动
+        const isOwnMessage = lastMessage?.user_id === currentUserId && !lastMessage?.is_ai && !lastMessage?.is_warning;
+
+        if (isAtBottom || isOwnMessage) {
+          scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        }
+        // 如果用户在查看历史消息且新消息是监管提醒或他人消息，则不滚动，保持当前阅读位置
       }
       
       prevMessagesLengthRef.current = messages.length;
     }
-  }, [messages]);
+  }, [messages, currentUserId]);
 
   const formatTime = (dateString: string) => {
     try {
@@ -44,7 +54,10 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
   };
 
   return (
-    <ScrollArea className="flex-1 p-4" ref={scrollRef}>
+    <div 
+      className="flex-1 overflow-y-auto p-4" 
+      ref={scrollRef}
+    >
       <div className="space-y-3">
         {messages.length === 0 ? (
           <div className="text-center text-muted-foreground py-8">
@@ -110,6 +123,6 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
           })
         )}
       </div>
-    </ScrollArea>
+    </div>
   );
 }

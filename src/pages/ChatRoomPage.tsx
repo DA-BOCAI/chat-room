@@ -60,6 +60,8 @@ export default function ChatRoomPage() {
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
+      console.log('开始生成摘要，参数:', { roomId, userId: user.id, lastSeen });
+
       const response = await fetch(`${supabaseUrl}/functions/v1/message-summary`, {
         method: 'POST',
         headers: {
@@ -74,16 +76,23 @@ export default function ChatRoomPage() {
         })
       });
 
+      console.log('摘要API响应状态:', response.status);
+
       if (!response.ok) {
-        console.error('生成摘要失败:', response.statusText);
+        const errorText = await response.text();
+        console.error('生成摘要失败:', response.statusText, errorText);
         return;
       }
 
       const result: SummaryData = await response.json();
+      console.log('摘要结果:', result);
       
       if (result.hasUnread && result.summary) {
         setSummaryData(result);
         setShowSummary(true);
+        console.log('显示摘要面板');
+      } else {
+        console.log('没有未读消息或摘要为空');
       }
     } catch (error) {
       console.error('调用摘要API失败:', error);
@@ -105,6 +114,7 @@ export default function ChatRoomPage() {
 
     // 获取用户最后查看时间
     const lastSeen = await getUserLastSeen(roomId);
+    console.log('用户最后查看时间:', lastSeen);
     
     const [roomData, membersData, messagesData] = await Promise.all([
       getRoomById(roomId),
@@ -117,15 +127,23 @@ export default function ChatRoomPage() {
     setMessages(messagesData);
     setLoading(false);
 
-    // 检查是否需要生成摘要（离线超过10分钟）
+    // 检查是否需要生成摘要（取消时间限制，只要有last_seen就尝试生成）
     if (lastSeen) {
       const lastSeenTime = new Date(lastSeen).getTime();
       const now = new Date().getTime();
       const diffMinutes = (now - lastSeenTime) / (1000 * 60);
       
-      if (diffMinutes > 10) {
+      console.log('时间差（分钟）:', diffMinutes);
+      
+      // 只要离线超过1分钟就生成摘要
+      if (diffMinutes > 1) {
+        console.log('触发智能总结，last_seen:', lastSeen);
         await generateSummary(lastSeen);
+      } else {
+        console.log('离线时间不足1分钟，不生成摘要');
       }
+    } else {
+      console.log('没有last_seen记录，可能是首次进入房间');
     }
   };
 
@@ -236,12 +254,32 @@ export default function ChatRoomPage() {
       }
     }
     
-    // 关闭摘要面板
+    // 关闭摘要面板并清除last_seen（标记已读）
     setShowSummary(false);
+    clearLastSeen();
+  };
+
+  // 清除last_seen（标记用户已查看所有消息）
+  const clearLastSeen = async () => {
+    if (!roomId || !user?.id) return;
+    
+    try {
+      await supabase
+        .from('room_members')
+        .update({ last_seen: null })
+        .eq('room_id', roomId)
+        .eq('user_id', user.id);
+      
+      console.log('已清除last_seen，标记消息为已读');
+    } catch (error) {
+      console.error('清除last_seen失败:', error);
+    }
   };
 
   const handleCloseSummary = () => {
     setShowSummary(false);
+    // 关闭摘要时也清除last_seen，标记消息为已读
+    clearLastSeen();
   };
 
   if (loading) {

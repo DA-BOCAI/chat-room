@@ -13,11 +13,25 @@ interface MessageListProps {
 
 export function MessageList({ messages, currentUserId, botName }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const prevMessagesLengthRef = useRef<number>(0);
+  const isInitialLoadRef = useRef<boolean>(true);
 
   useEffect(() => {
-    // 自动滚动到底部
+    // 只在有新消息时滚动到底部，初始加载时不滚动
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      const isNewMessage = messages.length > prevMessagesLengthRef.current;
+      
+      if (isNewMessage && !isInitialLoadRef.current) {
+        // 有新消息且不是初始加载，滚动到底部
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+      
+      // 标记初始加载完成
+      if (isInitialLoadRef.current && messages.length > 0) {
+        isInitialLoadRef.current = false;
+      }
+      
+      prevMessagesLengthRef.current = messages.length;
     }
   }, [messages]);
 

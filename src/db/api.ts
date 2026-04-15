@@ -92,11 +92,16 @@ export async function joinRoom(roomId: string) {
     throw new Error('未登录');
   }
 
+  // 使用upsert，如果用户之前在房间中，保留last_seen；如果是新加入，last_seen为NULL
   const { error } = await supabase
     .from('room_members')
-    .insert({
+    .upsert({
       room_id: roomId,
       user_id: user.user.id,
+      // 不设置last_seen，让数据库使用默认值NULL或保留原值
+    }, {
+      onConflict: 'room_id,user_id',
+      ignoreDuplicates: false
     });
 
   if (error) throw error;

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 // @ts-ignore
 import { supabase } from '@/db/supabase';
 import type { User } from '@supabase/supabase-js';
@@ -35,6 +35,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const isMounted = useRef(true);
 
   const refreshProfile = async () => {
     if (!user) {
@@ -43,18 +44,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const profileData = await getProfile(user.id);
-    setProfile(profileData);
+    if (isMounted.current) {
+      setProfile(profileData);
+    }
   };
 
   useEffect(() => {
+    isMounted.current = true;
     supabase
       .auth
       .getSession()
       // @ts-ignore
       .then(({ data: { session } }) => {
-        setUser(session?.user ?? null);
-        if (session?.user) {
-          getProfile(session.user.id).then(setProfile);
+        if (isMounted.current) {
+          setUser(session?.user ?? null);
+          if (session?.user) {
+            getProfile(session.user.id).then(setProfile);
+          }
         }
       })
       // @ts-ignore
@@ -62,12 +68,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         toast.error(`获取用户信息失败: ${error.message}`);
       })
       .finally(() => {
-        setLoading(false);
+        if (isMounted.current) {
+          setLoading(false);
+        }
       });
 
     // @ts-ignore
     // In this function, do NOT use any await calls. Use `.then()` instead to avoid deadlocks.
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!isMounted.current) return;
       setUser(session?.user ?? null);
       if (session?.user) {
         getProfile(session.user.id).then(setProfile);
@@ -76,7 +85,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted.current = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signInWithUsername = async (username: string, password: string) => {

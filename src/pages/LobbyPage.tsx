@@ -115,9 +115,10 @@ export default function LobbyPage() {
   };
 
   const handleSignOut = async () => {
-    await signOut();
-    toast.success('已退出登录');
+    // 先导航到登录页，让组件尽快卸载
     navigate('/login');
+    // 然后再执行 signOut，避免组件卸载过程中的竞态条件
+    await signOut();
   };
 
   return (

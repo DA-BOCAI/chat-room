@@ -21,15 +21,30 @@ import {
   getRoomMessages,
   leaveRoom,
   deleteRoom,
-  isUserInRoom,
-  getUserLastSeen,
+  checkUserRoomStatus,
 } from '@/db/api';
 import { supabase } from '@/db/supabase';
-import type { Room, RoomMember, Message } from '@/types/types';
+import type { Room, RoomMember, Message, Profile } from '@/types/types';
 import { MessageList } from '@/components/chat/MessageList';
 import { MessageInput } from '@/components/chat/MessageInput';
 import { OnlineUserList } from '@/components/chat/OnlineUserList';
 import { MessageSummary } from '@/components/chat/MessageSummary';
+
+// 二分查找插入位置（假设 messages 按 created_at 升序）
+function binarySearchInsert(messages: Message[], newTime: number): number {
+  let left = 0;
+  let right = messages.length;
+  while (left < right) {
+    const mid = Math.floor((left + right) / 2);
+    const msgTime = new Date(messages[mid].created_at).getTime();
+    if (msgTime < newTime) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  return left;
+}
 
 interface SummaryData {
   summary: string;
@@ -50,6 +65,30 @@ export default function ChatRoomPage() {
   const [showSummary, setShowSummary] = useState(false);
   const [loadingSummary, setLoadingSummary] = useState(false);
   const messageListRef = useRef<HTMLDivElement>(null);
+
+  // Profile 缓存
+  const profileCacheRef = useRef<Map<string, Profile>>(new Map());
+
+  // 初始化 profile 缓存
+  const initProfileCache = (msgs: Message[]) => {
+    msgs.forEach(msg => {
+      if (msg.profile && !profileCacheRef.current.has(msg.user_id)) {
+        profileCacheRef.current.set(msg.user_id, msg.profile);
+      }
+    });
+  };
+
+  // 获取 profile（先查缓存）
+  const getProfile = async (userId: string): Promise<Profile | null> => {
+    const cached = profileCacheRef.current.get(userId);
+    if (cached) return cached;
+
+    const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+    if (data) {
+      profileCacheRef.current.set(userId, data);
+    }
+    return data;
+  };
 
   // 更新消息内容（用于AI流式更新）
   const updateMessageContent = (messageId: string, content: string) => {
@@ -121,18 +160,17 @@ export default function ChatRoomPage() {
   const loadRoomData = async () => {
     if (!roomId) return;
 
-    // 检查用户是否在房间中
-    const inRoom = await isUserInRoom(roomId);
+    // 并行检查用户房间状态
+    const { inRoom, lastSeen } = await checkUserRoomStatus(roomId);
+    console.log('用户最后查看时间:', lastSeen);
+
     if (!inRoom) {
       toast.error('您不在该房间中');
       navigate('/lobby');
       return;
     }
 
-    // 获取用户最后查看时间
-    const lastSeen = await getUserLastSeen(roomId);
-    console.log('用户最后查看时间:', lastSeen);
-    
+    // 并行获取房间、成员、消息数据
     const [roomData, membersData, messagesData] = await Promise.all([
       getRoomById(roomId),
       getRoomMembers(roomId),
@@ -142,16 +180,20 @@ export default function ChatRoomPage() {
     setRoom(roomData);
     setMembers(membersData);
     setMessages(messagesData);
+
+    // 初始化 profile 缓存
+    initProfileCache(messagesData);
+
     setLoading(false);
 
-    // 检查是否需要生成摘要（取消时间限制，只要有last_seen就尝试生成）
+    // 检查是否需要生成摘要
     if (lastSeen) {
       const lastSeenTime = new Date(lastSeen).getTime();
       const now = new Date().getTime();
       const diffMinutes = (now - lastSeenTime) / (1000 * 60);
-      
+
       console.log('时间差（分钟）:', diffMinutes);
-      
+
       // 只要离线超过1分钟就生成摘要
       if (diffMinutes > 1) {
         console.log('触发智能总结，last_seen:', lastSeen);
@@ -169,7 +211,7 @@ export default function ChatRoomPage() {
 
     if (!roomId) return;
 
-    // 订阅消息变化（优化：只追加新消息，不重新获取全部）
+    // 订阅消息变化（优化：O(1) 追加 + profile 缓存）
     const messagesChannel = supabase
       .channel(`room-messages-${roomId}`)
       .on(
@@ -180,58 +222,102 @@ export default function ChatRoomPage() {
           table: 'messages',
           filter: `room_id=eq.${roomId}`,
         },
-        (payload) => {
+        async (payload) => {
           const newMessage = payload.new as Message;
           if (newMessage && newMessage.room_id === roomId) {
+            // 先查缓存获取 profile
+            const profile = await getProfile(newMessage.user_id);
+
             setMessages(prev => {
-              // 检查是否是 AI 消息且有对应的临时消息
-              if (newMessage.is_ai) {
-                const tempIndex = prev.findIndex(m => m.id.startsWith('ai-temp-'));
-                if (tempIndex !== -1) {
-                  // 移除临时消息
-                  const withoutTemp = prev.filter((_, index) => index !== tempIndex);
-                  // 按 created_at 升序插入真实 AI 消息
-                  const insertIndex = withoutTemp.findIndex(m =>
-                    new Date(newMessage.created_at) < new Date(m.created_at)
-                  );
-                  if (insertIndex === -1) {
-                    return [...withoutTemp, { ...newMessage, profile: prev[tempIndex].profile }];
-                  }
-                  const updated = [...withoutTemp];
-                  updated.splice(insertIndex, 0, { ...newMessage, profile: prev[tempIndex].profile });
-                  return updated;
+              // 检查是否是临时消息需要替换
+              const tempIndex = prev.findIndex(m => m.id.startsWith('temp-') || m.id.startsWith('ai-temp-'));
+              if (tempIndex !== -1) {
+                // 移除临时消息
+                const withoutTemp = prev.filter((_, index) => index !== tempIndex);
+                const msgWithProfile = { ...newMessage, profile: profile || prev[tempIndex].profile };
+
+                // 优化：直接 push 再排序（大多数情况消息有序）
+                const lastTime = withoutTemp.length > 0
+                  ? new Date(withoutTemp[withoutTemp.length - 1].created_at).getTime()
+                  : 0;
+                const newTime = new Date(msgWithProfile.created_at).getTime();
+
+                if (newTime >= lastTime) {
+                  return [...withoutTemp, msgWithProfile];
                 }
+
+                // 乱序情况用二分查找
+                const insertIndex = binarySearchInsert(withoutTemp, newTime);
+                const updated = [...withoutTemp];
+                updated.splice(insertIndex, 0, msgWithProfile);
+                return updated;
               }
-              // 普通消息：按 created_at 升序插入到正确位置
-              const insertIndex = prev.findIndex(m =>
-                new Date(newMessage.created_at) < new Date(m.created_at)
-              );
-              if (insertIndex === -1) {
-                return [...prev, newMessage];
+
+              // 非临时消息：优化插入
+              const lastTime = prev.length > 0
+                ? new Date(prev[prev.length - 1].created_at).getTime()
+                : 0;
+              const newTime = new Date(newMessage.created_at).getTime();
+
+              if (newTime >= lastTime) {
+                return [...prev, { ...newMessage, profile: profile || undefined }];
               }
+
+              // 乱序情况用二分查找
+              const insertIndex = binarySearchInsert(prev, newTime);
               const updated = [...prev];
-              updated.splice(insertIndex, 0, newMessage);
+              updated.splice(insertIndex, 0, { ...newMessage, profile: profile || undefined });
               return updated;
             });
           }
         }
       )
+      // 监听消息删除（审核不通过时消息被删除，UI 自动移除）
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'messages',
+          filter: `room_id=eq.${roomId}`,
+        },
+        (payload) => {
+          const deletedId = (payload.old as { id: string }).id;
+          setMessages(prev => prev.filter(m => m.id !== deletedId));
+        }
+      )
       .subscribe();
 
-    // 订阅成员变化
+    // 订阅成员变化（增量更新：只处理 INSERT/DELETE）
     const membersChannel = supabase
       .channel(`room-members-${roomId}`)
       .on(
         'postgres_changes',
         {
-          event: '*',
+          event: 'INSERT',
           schema: 'public',
           table: 'room_members',
           filter: `room_id=eq.${roomId}`,
         },
-        async () => {
-          const membersData = await getRoomMembers(roomId);
-          setMembers(membersData);
+        async (payload) => {
+          const newMember = payload.new as RoomMember;
+          const profile = await getProfile(newMember.user_id);
+          if (profile) {
+            setMembers(prev => [...prev, { ...newMember, profile }]);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'room_members',
+          filter: `room_id=eq.${roomId}`,
+        },
+        (payload) => {
+          const deleted = payload.old as { user_id: string };
+          setMembers(prev => prev.filter(m => m.user_id !== deleted.user_id));
         }
       )
       .subscribe();
@@ -302,32 +388,12 @@ export default function ChatRoomPage() {
       }
     }
     
-    // 关闭摘要面板并清除last_seen（标记已读）
+    // 关闭摘要面板
     setShowSummary(false);
-    clearLastSeen();
-  };
-
-  // 清除last_seen（标记用户已查看所有消息）
-  const clearLastSeen = async () => {
-    if (!roomId || !user?.id) return;
-    
-    try {
-      await supabase
-        .from('room_members')
-        .update({ last_seen: null })
-        .eq('room_id', roomId)
-        .eq('user_id', user.id);
-      
-      console.log('已清除last_seen，标记消息为已读');
-    } catch (error) {
-      console.error('清除last_seen失败:', error);
-    }
   };
 
   const handleCloseSummary = () => {
     setShowSummary(false);
-    // 关闭摘要时也清除last_seen，标记消息为已读
-    clearLastSeen();
   };
 
   if (loading) {
@@ -405,6 +471,7 @@ export default function ChatRoomPage() {
           <MessageInput
             roomId={roomId || ''}
             room={room}
+            existingMessages={messages}
             onUpdateMessage={updateMessageContent}
             onDeleteMessage={removeMessage}
             onAddTempMessage={addTempMessage}

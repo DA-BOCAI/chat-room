@@ -4,6 +4,15 @@ import type { Message } from '@/types/types';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 
+// 移到组件外部作为纯函数，避免每次渲染重建
+const formatTime = (dateString: string): string => {
+  try {
+    return format(new Date(dateString), 'HH:mm:ss', { locale: zhCN });
+  } catch {
+    return '';
+  }
+};
+
 interface MessageListProps {
   messages: Message[];
   currentUserId: string;
@@ -44,14 +53,6 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
       prevMessagesLengthRef.current = messages.length;
     }
   }, [messages, currentUserId]);
-
-  const formatTime = (dateString: string) => {
-    try {
-      return format(new Date(dateString), 'HH:mm:ss', { locale: zhCN });
-    } catch {
-      return '';
-    }
-  };
 
   return (
     <div 

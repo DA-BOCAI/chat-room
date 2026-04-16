@@ -40,6 +40,8 @@ export default function LoginPage() {
     }
 
     toast.success('登录成功');
+    // 等待 React 状态更新完成
+    await new Promise(resolve => setTimeout(resolve, 0));
     navigate(from, { replace: true });
   };
 

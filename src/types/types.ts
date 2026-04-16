@@ -25,6 +25,7 @@ export interface RoomMember {
   room_id: string;
   user_id: string;
   joined_at: string;
+  last_seen?: string | null;
   profile?: Profile;
 }
 
@@ -46,4 +47,5 @@ export interface ModerationResult {
   violationType?: string;
   warningMessage?: string;
   error?: string;
+  flaggedCategories?: string[];
 }

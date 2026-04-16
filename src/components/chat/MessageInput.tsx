@@ -3,21 +3,23 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Send, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { sendMessage, getRoomMessages } from '@/db/api';
+import { sendMessage } from '@/db/api';
 import { sendStreamRequest } from '@/lib/sse';
 import { supabase } from '@/db/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { localModeration } from '@/lib/moderation';
 import type { Room, ModerationResult, Message } from '@/types/types';
 
 interface MessageInputProps {
   roomId: string;
   room: Room | null;
+  existingMessages?: Message[];
   onUpdateMessage?: (messageId: string, content: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   onAddTempMessage?: (message: Message) => void;
 }
 
-export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, onAddTempMessage }: MessageInputProps) {
+export function MessageInput({ roomId, room, existingMessages = [], onUpdateMessage, onDeleteMessage, onAddTempMessage }: MessageInputProps) {
   const { user } = useAuth();
   const [content, setContent] = useState('');
   const [sending, setSending] = useState(false);
@@ -56,14 +58,12 @@ export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, o
     }
   };
 
-  // 发送监管警告消息
-  const sendWarningMessage = async (violationType: string, warningMessage?: string) => {
+  // 发送监管警告消息（仅通知触发者本人）
+  const sendWarningMessage = (violationType: string, warningMessage?: string) => {
     const warningText = `⚠️ 系统监管提醒：检测到您的消息包含${violationType}内容，请注意文明用语，遵守社区规范。${warningMessage ? `（${warningMessage}）` : ''}`;
-    try {
-      await sendMessage(roomId, warningText, true, true);
-    } catch (error) {
-      console.error('发送警告消息失败:', error);
-    }
+    toast.error(warningText, {
+      duration: 5000,
+    });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -83,32 +83,49 @@ export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, o
     setContent('');
     setSending(true);
 
-    // 乐观发送：立即发送消息
-    let sentMessageId: string | null = null;
+    // 1. 先进行本地敏感词快速过滤
+    const localResult = localModeration(messageContent);
+    if (!localResult.isPass) {
+      sendWarningMessage(localResult.category || '敏感词');
+      setSending(false);
+      return;
+    }
+
+    // 2. 立即发送消息（乐观更新），后台异步审核
+    let tempId: string | null = null;
     try {
-      const result = await sendMessage(roomId, messageContent);
-      sentMessageId = result?.id || null;
+      tempId = `temp-${Date.now()}`;
+      if (onAddTempMessage) {
+        onAddTempMessage({
+          id: tempId,
+          room_id: roomId,
+          user_id: user?.id || '',
+          content: messageContent,
+          is_ai: false,
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      await sendMessage(roomId, messageContent);
     } catch (error) {
+      // 发送失败，移除临时消息
+      if (tempId && onDeleteMessage) {
+        onDeleteMessage(tempId);
+      }
       toast.error(`发送失败: ${(error as Error).message}`);
       setSending(false);
       return;
     }
 
-    // 异步审核（不阻塞）
-    moderateContent(messageContent).then(async (moderationResult) => {
-      if (!moderationResult.isSafe && sentMessageId && onDeleteMessage) {
-        // 审核失败，删除消息
-        onDeleteMessage(sentMessageId);
-        toast.error(`消息包含${moderationResult.violationType || '敏感'}内容，已被拦截`);
-
-        // AI监管发送警告
-        await sendWarningMessage(
-          moderationResult.violationType || '敏感',
-          moderationResult.warningMessage
+    // 3. 后台异步审核（fire-and-forget），不阻塞 UI
+    moderateContent(messageContent).then(result => {
+      if (!result.isSafe) {
+        // 审核不通过：发送警告消息（消息已发送，通过实时订阅 DELETE 事件自动从 UI 移除）
+        sendWarningMessage(
+          result.violationType || '敏感',
+          result.warningMessage
         );
       }
-    }).catch(error => {
-      console.error('审核失败:', error);
     });
 
     // 检查是否@了AI机器人
@@ -128,6 +145,8 @@ export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, o
     // 生成临时 ID 用于流式更新
     const tempId = `ai-temp-${Date.now()}`;
     let aiResponse = '';
+    let rafId: number | null = null;
+    let pendingUpdate = false;
 
     try {
       // 添加临时 AI 消息到列表
@@ -142,8 +161,8 @@ export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, o
         });
       }
 
-      // 获取最近的聊天历史（用于上下文）
-      const recentMessages = await getRoomMessages(roomId, 10);
+      // 复用已有消息历史（不重新查询）
+    const recentMessages = existingMessages.slice(-5);
 
       // 构建消息历史
       const messages: Array<{
@@ -155,7 +174,7 @@ export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, o
           content: [{ type: 'text', text: room.bot_prompt || '' }]
         },
         // 添加最近的对话历史
-        ...recentMessages.slice(-5).map(msg => {
+        ...recentMessages.map(msg => {
           const msgRole: 'system' | 'user' | 'assistant' = msg.is_ai ? 'assistant' : 'user';
           return {
             role: msgRole,
@@ -184,15 +203,31 @@ export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, o
             const parsed = JSON.parse(data);
             const chunk = parsed.choices?.[0]?.delta?.content || '';
             aiResponse += chunk;
-            // 流式更新消息内容
-            if (onUpdateMessage) {
-              onUpdateMessage(tempId, aiResponse);
+            pendingUpdate = true;
+
+            // 使用 requestAnimationFrame 节流
+            if (rafId === null) {
+              rafId = requestAnimationFrame(() => {
+                if (pendingUpdate && onUpdateMessage) {
+                  onUpdateMessage(tempId, aiResponse);
+                }
+                rafId = null;
+                pendingUpdate = false;
+              });
             }
           } catch (e) {
             console.warn('解析AI响应失败:', e);
           }
         },
         onComplete: async () => {
+          // 取消任何待处理的动画帧
+          if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+          }
+          // 如果还有待更新内容，先更新一次
+          if (pendingUpdate && onUpdateMessage) {
+            onUpdateMessage(tempId, aiResponse);
+          }
           // AI响应完成后，在保存到数据库的时刻生成时间戳
           const aiCreatedAt = new Date().toISOString();
           if (aiResponse.trim()) {

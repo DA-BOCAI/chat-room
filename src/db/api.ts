@@ -7,10 +7,7 @@ import type { Room, Message, RoomMember } from '@/types/types';
 export async function getRooms(): Promise<Room[]> {
   const { data, error } = await supabase
     .from('rooms')
-    .select(`
-      *,
-      room_members(count)
-    `)
+    .select('*')
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -18,9 +15,25 @@ export async function getRooms(): Promise<Room[]> {
     return [];
   }
 
-  return (Array.isArray(data) ? data : []).map((room) => ({
+  const roomList = Array.isArray(data) ? data : [];
+  if (roomList.length === 0) return [];
+
+  // 一次查询获取所有房间的在线人数
+  const roomIds = roomList.map(r => r.id);
+  const { data: membersData } = await supabase
+    .from('room_members')
+    .select('room_id')
+    .in('room_id', roomIds)
+    .is('last_seen', null);
+
+  const countMap = new Map<string, number>();
+  membersData?.forEach(m => {
+    countMap.set(m.room_id, (countMap.get(m.room_id) || 0) + 1);
+  });
+
+  return roomList.map(room => ({
     ...room,
-    member_count: room.room_members?.[0]?.count || 0,
+    member_count: countMap.get(room.id) || 0
   }));
 }
 
@@ -92,13 +105,13 @@ export async function joinRoom(roomId: string) {
     throw new Error('未登录');
   }
 
-  // 使用upsert，如果用户之前在房间中，保留last_seen；如果是新加入，last_seen为NULL
+  // 使用upsert，用户重新加入时重置last_seen为NULL（表示在线）
   const { error } = await supabase
     .from('room_members')
     .upsert({
       room_id: roomId,
       user_id: user.user.id,
-      // 不设置last_seen，让数据库使用默认值NULL或保留原值
+      last_seen: null, // 重置为NULL表示在线
     }, {
       onConflict: 'room_id,user_id',
       ignoreDuplicates: false
@@ -147,7 +160,7 @@ export async function leaveAllRooms() {
   }
 }
 
-// 获取房间成员列表
+// 获取房间成员列表（只返回真正在线的用户，即 last_seen 为 NULL）
 export async function getRoomMembers(roomId: string): Promise<RoomMember[]> {
   const { data, error } = await supabase
     .from('room_members')
@@ -156,6 +169,7 @@ export async function getRoomMembers(roomId: string): Promise<RoomMember[]> {
       profile:profiles(*)
     `)
     .eq('room_id', roomId)
+    .is('last_seen', null)
     .order('joined_at', { ascending: true });
 
   if (error) {
@@ -166,7 +180,7 @@ export async function getRoomMembers(roomId: string): Promise<RoomMember[]> {
   return Array.isArray(data) ? data : [];
 }
 
-// 检查用户是否在房间中
+// 检查用户是否在房间中（只检查 last_seen 为 NULL 的记录，即真正在线的用户）
 export async function isUserInRoom(roomId: string): Promise<boolean> {
   const { data: user } = await supabase.auth.getUser();
   if (!user.user) return false;
@@ -176,6 +190,7 @@ export async function isUserInRoom(roomId: string): Promise<boolean> {
     .select('id')
     .eq('room_id', roomId)
     .eq('user_id', user.user.id)
+    .is('last_seen', null)
     .maybeSingle();
 
   if (error) return false;
@@ -196,6 +211,26 @@ export async function getUserLastSeen(roomId: string): Promise<string | null> {
 
   if (error || !data) return null;
   return data.last_seen;
+}
+
+// 联合查询：检查用户是否在房间中以及最后查看时间
+export async function checkUserRoomStatus(roomId: string): Promise<{ inRoom: boolean; lastSeen: string | null }> {
+  const { data: user } = await supabase.auth.getUser();
+  if (!user.user) return { inRoom: false, lastSeen: null };
+
+  const { data, error } = await supabase
+    .from('room_members')
+    .select('last_seen')
+    .eq('room_id', roomId)
+    .eq('user_id', user.user.id)
+    .maybeSingle();
+
+  if (error || !data) return { inRoom: false, lastSeen: null };
+
+  return {
+    inRoom: data.last_seen === null,
+    lastSeen: data.last_seen || null
+  };
 }
 
 // ==================== 消息相关 ====================

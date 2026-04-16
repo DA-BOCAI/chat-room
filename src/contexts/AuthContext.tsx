@@ -101,8 +101,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (error) throw error;
 
-      // 确保 session 已同步，防止竞态条件
-      await supabase.auth.getSession();
+      // 直接获取 session 并更新状态，不依赖 onAuthStateChange 回调
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        setUser(session.user);
+        const profileData = await getProfile(session.user.id);
+        if (isMounted.current) {
+          setProfile(profileData);
+        }
+      }
 
       return { error: null };
     } catch (error) {

@@ -221,7 +221,13 @@ export async function getRoomMessages(roomId: string, limit = 50): Promise<Messa
 }
 
 // 发送消息
-export async function sendMessage(roomId: string, content: string, isAi: boolean = false, isWarning: boolean = false) {
+export async function sendMessage(
+  roomId: string,
+  content: string,
+  isAi: boolean = false,
+  isWarning: boolean = false,
+  createdAt?: string
+): Promise<{ id: string } | null> {
   const { data: user } = await supabase.auth.getUser();
   if (!user.user) {
     throw new Error('未登录');
@@ -236,7 +242,7 @@ export async function sendMessage(roomId: string, content: string, isAi: boolean
     throw new Error('消息长度不能超过500字');
   }
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('messages')
     .insert({
       room_id: roomId,
@@ -244,7 +250,31 @@ export async function sendMessage(roomId: string, content: string, isAi: boolean
       content: trimmedContent,
       is_ai: isAi,
       is_warning: isWarning,
-    });
+      ...(createdAt && { created_at: createdAt }),
+    })
+    .select('id')
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+// 删除消息
+export async function deleteMessage(messageId: string) {
+  const { error } = await supabase
+    .from('messages')
+    .delete()
+    .eq('id', messageId);
+
+  if (error) throw error;
+}
+
+// 更新消息内容
+export async function updateMessage(messageId: string, content: string) {
+  const { error } = await supabase
+    .from('messages')
+    .update({ content })
+    .eq('id', messageId);
 
   if (error) throw error;
 }

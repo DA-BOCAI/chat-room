@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "Bash(npx vite:*)",
+      "Bash(D:/app-aygkbmf3b8qp/node_modules/.bin/tsgo:*)",
+      "Bash(D:/app-aygkbmf3b8qp/node_modules/.bin/biome lint:*)",
+      "Bash(npx biome:*)",
+      "Bash(npx tsc:*)",
+      "mcp__MiniMax__understand_image"
+    ]
+  }
+}

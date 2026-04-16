@@ -7,14 +7,17 @@ import { sendMessage, getRoomMessages } from '@/db/api';
 import { sendStreamRequest } from '@/lib/sse';
 import { supabase } from '@/db/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import type { Room, ModerationResult } from '@/types/types';
+import type { Room, ModerationResult, Message } from '@/types/types';
 
 interface MessageInputProps {
   roomId: string;
   room: Room | null;
+  onUpdateMessage?: (messageId: string, content: string) => void;
+  onDeleteMessage?: (messageId: string) => void;
+  onAddTempMessage?: (message: Message) => void;
 }
 
-export function MessageInput({ roomId, room }: MessageInputProps) {
+export function MessageInput({ roomId, room, onUpdateMessage, onDeleteMessage, onAddTempMessage }: MessageInputProps) {
   const { user } = useAuth();
   const [content, setContent] = useState('');
   const [sending, setSending] = useState(false);
@@ -76,56 +79,72 @@ export function MessageInput({ roomId, room }: MessageInputProps) {
       return;
     }
 
+    const messageContent = content.trim();
+    setContent('');
     setSending(true);
-    try {
-      // 先进行内容审核
-      const moderationResult = await moderateContent(content);
 
-      if (!moderationResult.isSafe) {
-        // 检测到敏感内容，阻止发送
-        toast.error(`消息包含${moderationResult.violationType || '敏感'}内容，无法发送`);
-        
+    // 乐观发送：立即发送消息
+    let sentMessageId: string | null = null;
+    try {
+      const result = await sendMessage(roomId, messageContent);
+      sentMessageId = result?.id || null;
+    } catch (error) {
+      toast.error(`发送失败: ${(error as Error).message}`);
+      setSending(false);
+      return;
+    }
+
+    // 异步审核（不阻塞）
+    moderateContent(messageContent).then(async (moderationResult) => {
+      if (!moderationResult.isSafe && sentMessageId && onDeleteMessage) {
+        // 审核失败，删除消息
+        onDeleteMessage(sentMessageId);
+        toast.error(`消息包含${moderationResult.violationType || '敏感'}内容，已被拦截`);
+
         // AI监管发送警告
         await sendWarningMessage(
           moderationResult.violationType || '敏感',
           moderationResult.warningMessage
         );
-        
-        setContent('');
-        setSending(false);
-        return;
       }
+    }).catch(error => {
+      console.error('审核失败:', error);
+    });
 
-      // 检查是否@了AI机器人
-      const botName = room?.bot_name;
-      const isAtBot = botName && content.includes(`@${botName}`);
+    // 检查是否@了AI机器人
+    const botName = room?.bot_name;
+    const isAtBot = botName && messageContent.includes(`@${botName}`);
 
-      // 发送用户消息
-      await sendMessage(roomId, content);
-      const userMessage = content;
-      setContent('');
-
-      // 如果@了机器人，调用AI
-      if (isAtBot && room?.bot_prompt) {
-        setAiGenerating(true);
-        await handleAIResponse(userMessage, room);
-      }
-    } catch (error) {
-      if ((error as Error).message.includes('网络')) {
-        toast.error('网络连接异常，消息发送失败，请检查网络后重试');
-      } else {
-        toast.error(`发送失败: ${(error as Error).message}`);
-      }
-    } finally {
-      setSending(false);
+    // 如果@了机器人，调用AI
+    if (isAtBot && room?.bot_prompt) {
+      setAiGenerating(true);
+      handleAIResponse(messageContent, room);
     }
+
+    setSending(false);
   };
 
   const handleAIResponse = async (userMessage: string, room: Room) => {
+    // 生成临时 ID 用于流式更新
+    const tempId = `ai-temp-${Date.now()}`;
+    let aiResponse = '';
+
     try {
+      // 添加临时 AI 消息到列表
+      if (onAddTempMessage) {
+        onAddTempMessage({
+          id: tempId,
+          room_id: roomId,
+          user_id: user?.id || '',
+          content: '',
+          is_ai: true,
+          created_at: new Date().toISOString(),
+        });
+      }
+
       // 获取最近的聊天历史（用于上下文）
       const recentMessages = await getRoomMessages(roomId, 10);
-      
+
       // 构建消息历史
       const messages: Array<{
         role: 'system' | 'user' | 'assistant';
@@ -150,7 +169,6 @@ export function MessageInput({ roomId, room }: MessageInputProps) {
         }
       ];
 
-      let aiResponse = '';
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
@@ -166,15 +184,20 @@ export function MessageInput({ roomId, room }: MessageInputProps) {
             const parsed = JSON.parse(data);
             const chunk = parsed.choices?.[0]?.delta?.content || '';
             aiResponse += chunk;
+            // 流式更新消息内容
+            if (onUpdateMessage) {
+              onUpdateMessage(tempId, aiResponse);
+            }
           } catch (e) {
             console.warn('解析AI响应失败:', e);
           }
         },
         onComplete: async () => {
-          // AI响应完成后，保存到数据库
+          // AI响应完成后，在保存到数据库的时刻生成时间戳
+          const aiCreatedAt = new Date().toISOString();
           if (aiResponse.trim()) {
             try {
-              await sendMessage(roomId, aiResponse, true);
+              await sendMessage(roomId, aiResponse, true, false, aiCreatedAt);
             } catch (error) {
               console.error('保存AI消息失败:', error);
             }

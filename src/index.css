@@ -74,8 +74,5 @@ All colors MUST be HSL.
   }
 }
 
-/* Remove Miaoda watermark */
-[class*="miaoda"], [id*="miaoda"], .watermark {
-  display: none !important;
-}
+/* Custom styles below */
 

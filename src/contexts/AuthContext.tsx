@@ -81,13 +81,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signInWithUsername = async (username: string, password: string) => {
     try {
-      const email = `${username}@miaoda.com`;
+      const email = `${username}@example.com`;
       const { error } = await supabase.auth.signInWithPassword({
         email,
         password,
       });
 
       if (error) throw error;
+
+      // 确保 session 已同步，防止竞态条件
+      await supabase.auth.getSession();
+
       return { error: null };
     } catch (error) {
       return { error: error as Error };
@@ -96,7 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signUpWithUsername = async (username: string, password: string) => {
     try {
-      const email = `${username}@miaoda.com`;
+      const email = `${username}@example.com`;
       const { error } = await supabase.auth.signUp({
         email,
         password,

@@ -51,6 +51,23 @@ export default function ChatRoomPage() {
   const [loadingSummary, setLoadingSummary] = useState(false);
   const messageListRef = useRef<HTMLDivElement>(null);
 
+  // 更新消息内容（用于AI流式更新）
+  const updateMessageContent = (messageId: string, content: string) => {
+    setMessages(prev => prev.map(msg =>
+      msg.id === messageId ? { ...msg, content } : msg
+    ));
+  };
+
+  // 删除消息（用于审核失败后删除）
+  const removeMessage = (messageId: string) => {
+    setMessages(prev => prev.filter(msg => msg.id !== messageId));
+  };
+
+  // 添加临时消息（用于AI流式显示）
+  const addTempMessage = (message: Message) => {
+    setMessages(prev => [...prev, message]);
+  };
+
   // 生成消息摘要
   const generateSummary = async (lastSeen: string) => {
     if (!roomId || !user?.id) return;
@@ -152,7 +169,7 @@ export default function ChatRoomPage() {
 
     if (!roomId) return;
 
-    // 订阅消息变化
+    // 订阅消息变化（优化：只追加新消息，不重新获取全部）
     const messagesChannel = supabase
       .channel(`room-messages-${roomId}`)
       .on(
@@ -163,9 +180,40 @@ export default function ChatRoomPage() {
           table: 'messages',
           filter: `room_id=eq.${roomId}`,
         },
-        async () => {
-          const messagesData = await getRoomMessages(roomId);
-          setMessages(messagesData);
+        (payload) => {
+          const newMessage = payload.new as Message;
+          if (newMessage && newMessage.room_id === roomId) {
+            setMessages(prev => {
+              // 检查是否是 AI 消息且有对应的临时消息
+              if (newMessage.is_ai) {
+                const tempIndex = prev.findIndex(m => m.id.startsWith('ai-temp-'));
+                if (tempIndex !== -1) {
+                  // 移除临时消息
+                  const withoutTemp = prev.filter((_, index) => index !== tempIndex);
+                  // 按 created_at 升序插入真实 AI 消息
+                  const insertIndex = withoutTemp.findIndex(m =>
+                    new Date(newMessage.created_at) < new Date(m.created_at)
+                  );
+                  if (insertIndex === -1) {
+                    return [...withoutTemp, { ...newMessage, profile: prev[tempIndex].profile }];
+                  }
+                  const updated = [...withoutTemp];
+                  updated.splice(insertIndex, 0, { ...newMessage, profile: prev[tempIndex].profile });
+                  return updated;
+                }
+              }
+              // 普通消息：按 created_at 升序插入到正确位置
+              const insertIndex = prev.findIndex(m =>
+                new Date(newMessage.created_at) < new Date(m.created_at)
+              );
+              if (insertIndex === -1) {
+                return [...prev, newMessage];
+              }
+              const updated = [...prev];
+              updated.splice(insertIndex, 0, newMessage);
+              return updated;
+            });
+          }
         }
       )
       .subscribe();
@@ -354,7 +402,13 @@ export default function ChatRoomPage() {
         {/* 消息区域 */}
         <div className="flex-1 flex flex-col">
           <MessageList messages={messages} currentUserId={user?.id || ''} botName={room.bot_name} />
-          <MessageInput roomId={roomId || ''} room={room} />
+          <MessageInput
+            roomId={roomId || ''}
+            room={room}
+            onUpdateMessage={updateMessageContent}
+            onDeleteMessage={removeMessage}
+            onAddTempMessage={addTempMessage}
+          />
         </div>
 
         {/* 右侧边栏 */}

@@ -131,17 +131,18 @@ ${messageTexts}
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
-      console.error('AI总结API错误:', errorData);
+      // AI API 可能返回 SSE 格式的错误，先尝试读取原始内容
+      const errorText = await response.text();
+      console.error('AI总结API错误:', response.status, errorText);
       return new Response(
-        JSON.stringify({ 
+        JSON.stringify({
           error: 'AI总结服务暂时不可用',
           unreadCount: messages.length,
           hasUnread: true
         }),
-        { 
-          status: 500, 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         }
       );
     }

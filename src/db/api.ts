@@ -105,16 +105,19 @@ export async function joinRoom(roomId: string) {
     throw new Error('未登录');
   }
 
-  // 使用upsert，用户重新加入时重置last_seen为NULL（表示在线）
+  // 先删除旧记录（如果存在），再插入新记录
+  // 这样确保每次进入都触发 INSERT 事件，订阅能正确更新在线列表
+  await supabase
+    .from('room_members')
+    .delete()
+    .eq('room_id', roomId)
+    .eq('user_id', user.user.id);
+
   const { error } = await supabase
     .from('room_members')
-    .upsert({
+    .insert({
       room_id: roomId,
       user_id: user.user.id,
-      last_seen: null, // 重置为NULL表示在线
-    }, {
-      onConflict: 'room_id,user_id',
-      ignoreDuplicates: false
     });
 
   if (error) throw error;
@@ -126,13 +129,6 @@ export async function leaveRoom(roomId: string) {
   if (!user.user) {
     throw new Error('未登录');
   }
-
-  // 更新last_seen时间
-  await supabase
-    .from('room_members')
-    .update({ last_seen: new Date().toISOString() })
-    .eq('room_id', roomId)
-    .eq('user_id', user.user.id);
 
   const { error } = await supabase
     .from('room_members')

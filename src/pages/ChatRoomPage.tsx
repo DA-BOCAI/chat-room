@@ -46,6 +46,19 @@ function binarySearchInsert(messages: Message[], newTime: number): number {
   return left;
 }
 
+// 获取未读消息的辅助函数
+async function getUnreadMessages(roomId: string, lastSeen: string) {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('content, created_at, profile:profiles(username)')
+    .eq('room_id', roomId)
+    .gt('created_at', lastSeen)
+    .order('created_at', { ascending: true });
+
+  if (error) return [];
+  return data || [];
+}
+
 interface SummaryData {
   summary: string;
   unreadCount: number;
@@ -58,7 +71,7 @@ export default function ChatRoomPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [room, setRoom] = useState<Room | null>(null);
-  const [members, setMembers] = useState<RoomMember[]>([]);
+  const [members, setMembers] = useState<Map<string, RoomMember>>(new Map());
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [summaryData, setSummaryData] = useState<SummaryData | null>(null);
@@ -113,45 +126,80 @@ export default function ChatRoomPage() {
 
     setLoadingSummary(true);
     try {
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      // 1. 获取未读消息
+      const messages = await getUnreadMessages(roomId, lastSeen);
 
-      console.log('开始生成摘要，参数:', { roomId, userId: user.id, lastSeen });
-
-      const response = await fetch(`${supabaseUrl}/functions/v1/message-summary`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${supabaseAnonKey}`,
-          'apikey': supabaseAnonKey,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          roomId,
-          userId: user.id,
-          lastSeen
-        })
-      });
-
-      console.log('摘要API响应状态:', response.status);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('生成摘要失败:', response.statusText, errorText);
+      if (!messages || messages.length === 0) {
+        console.log('没有未读消息');
         return;
       }
 
-      const result: SummaryData = await response.json();
-      console.log('摘要结果:', result);
-      
-      if (result.hasUnread && result.summary) {
-        setSummaryData(result);
-        setShowSummary(true);
-        console.log('显示摘要面板');
-      } else {
-        console.log('没有未读消息或摘要为空');
+      // 2. 构建消息文本
+      const messageTexts = messages.map((msg: any) => {
+        const username = msg.profile?.username || '未知用户';
+        return `${username}: ${msg.content}`;
+      }).join('\n');
+
+      // 3. 调用 AI API
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      const apiUrl = `${supabaseUrl}/functions/v1/chat-with-ai`;
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          messages: [{
+            role: 'user',
+            content: [{ type: 'text', text: `请总结以下聊天记录，简洁明了（3-5句）：\n${messageTexts}` }]
+          }],
+          enable_thinking: false,
+        }),
+      });
+
+      if (!response.ok) {
+        console.error('AI摘要失败:', response.statusText);
+        return;
       }
+
+      // 4. 解析 SSE 流式响应
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let summaryText = '';
+
+      while (reader) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n').filter(line => line.trim());
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+            try {
+              const parsed = JSON.parse(data);
+              const content = parsed.choices?.[0]?.delta?.content || '';
+              summaryText += content;
+            } catch (e) { /* ignore */ }
+          }
+        }
+      }
+
+      // 5. 显示摘要
+      setSummaryData({
+        summary: summaryText.trim(),
+        unreadCount: messages.length,
+        hasUnread: true,
+        firstUnreadTime: messages[0].created_at
+      });
+      setShowSummary(true);
+      console.log('显示摘要面板');
+
     } catch (error) {
-      console.error('调用摘要API失败:', error);
+      console.error('生成摘要失败:', error);
     } finally {
       setLoadingSummary(false);
     }
@@ -178,7 +226,7 @@ export default function ChatRoomPage() {
     ]);
 
     setRoom(roomData);
-    setMembers(membersData);
+    setMembers(new Map(membersData.map(m => [m.user_id, m])));
     setMessages(messagesData);
 
     // 初始化 profile 缓存
@@ -186,23 +234,17 @@ export default function ChatRoomPage() {
 
     setLoading(false);
 
-    // 检查是否需要生成摘要
-    if (lastSeen) {
-      const lastSeenTime = new Date(lastSeen).getTime();
-      const now = new Date().getTime();
-      const diffMinutes = (now - lastSeenTime) / (1000 * 60);
-
-      console.log('时间差（分钟）:', diffMinutes);
-
-      // 只要离线超过1分钟就生成摘要
-      if (diffMinutes > 1) {
-        console.log('触发智能总结，last_seen:', lastSeen);
-        await generateSummary(lastSeen);
-      } else {
-        console.log('离线时间不足1分钟，不生成摘要');
-      }
+    // 检查是否需要生成摘要 - 只有之前离开过房间才生成摘要
+    const lastLeftStr = sessionStorage.getItem(`last_left_${roomId}`);
+    if (lastLeftStr) {
+      console.log('触发智能总结（基于 sessionStorage）');
+      await generateSummary(lastLeftStr);
+      sessionStorage.removeItem(`last_left_${roomId}`);
+    } else if (lastSeen) {
+      console.log('触发智能总结（基于数据库 last_seen）');
+      await generateSummary(lastSeen);
     } else {
-      console.log('没有last_seen记录，可能是首次进入房间');
+      console.log('首次进入房间，跳过摘要生成');
     }
   };
 
@@ -303,8 +345,41 @@ export default function ChatRoomPage() {
           const newMember = payload.new as RoomMember;
           const profile = await getProfile(newMember.user_id);
           if (profile) {
-            setMembers(prev => [...prev, { ...newMember, profile }]);
+            setMembers(prev => {
+              const next = new Map(prev);
+              next.set(newMember.user_id, { ...newMember, profile });
+              return next;
+            });
           }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'room_members',
+          filter: `room_id=eq.${roomId}`,
+        },
+        (payload) => {
+          const updated = payload.new as RoomMember;
+          // last_seen 非 null 表示用户已离线（退出房间或离开大厅）
+          const isOffline = !!updated.last_seen;
+
+          setMembers(prev => {
+            const next = new Map(prev);
+            if (isOffline) {
+              next.delete(updated.user_id);
+            } else {
+              // last_seen 为 null，表示用户在线，更新成员信息
+              getProfile(updated.user_id).then(profile => {
+                if (profile) {
+                  setMembers(p => new Map(p).set(updated.user_id, { ...updated, profile }));
+                }
+              });
+            }
+            return next;
+          });
         }
       )
       .on(
@@ -316,8 +391,13 @@ export default function ChatRoomPage() {
           filter: `room_id=eq.${roomId}`,
         },
         (payload) => {
-          const deleted = payload.old as { user_id: string };
-          setMembers(prev => prev.filter(m => m.user_id !== deleted.user_id));
+          // 从 payload.old 获取离开用户的 user_id
+          const leftUserId = payload.old.user_id;
+          setMembers(prev => {
+            const next = new Map(prev);
+            next.delete(leftUserId);
+            return next;
+          });
         }
       )
       .subscribe();
@@ -351,6 +431,8 @@ export default function ChatRoomPage() {
     if (!roomId) return;
 
     try {
+      // 保存离开时间到 sessionStorage，用于智能摘要功能
+      sessionStorage.setItem(`last_left_${roomId}`, new Date().toISOString());
       await leaveRoom(roomId);
       toast.success('已退出房间');
       navigate('/lobby');
@@ -423,12 +505,17 @@ export default function ChatRoomPage() {
       {/* 顶部导航栏 */}
       <header className="border-b border-border bg-card px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={() => navigate('/lobby')}>
+          <Button variant="ghost" size="icon" onClick={() => {
+            if (roomId) {
+              sessionStorage.setItem(`last_left_${roomId}`, new Date().toISOString());
+            }
+            navigate('/lobby');
+          }}>
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
             <h1 className="font-semibold text-foreground">{room.name}</h1>
-            <p className="text-xs text-muted-foreground">{members.length}人在线</p>
+            <p className="text-xs text-muted-foreground">{members.size}人在线</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -503,7 +590,7 @@ export default function ChatRoomPage() {
 
           {/* 在线用户列表 */}
           <div className="flex-1 overflow-hidden">
-            <OnlineUserList members={members} creatorId={room.creator_id} />
+            <OnlineUserList members={[...members.values()]} creatorId={room.creator_id} />
           </div>
         </div>
       </div>

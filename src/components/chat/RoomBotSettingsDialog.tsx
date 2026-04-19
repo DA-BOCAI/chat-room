@@ -18,7 +18,7 @@ import { getRoomBotConfigForOwner, updateRoomBotConfig } from '@/db/api';
 interface RoomBotSettingsDialogProps {
   roomId: string;
   currentBotName?: string;
-  onUpdated?: (botName: string) => void;
+  onUpdated?: (config: { botName: string; botPrompt: string }) => void;
 }
 
 export function RoomBotSettingsDialog({ roomId, currentBotName, onUpdated }: RoomBotSettingsDialogProps) {
@@ -81,7 +81,10 @@ export function RoomBotSettingsDialog({ roomId, currentBotName, onUpdated }: Roo
     setSaving(true);
     try {
       const result = await updateRoomBotConfig(roomId, botName, botPrompt);
-      onUpdated?.(result.bot_name);
+      onUpdated?.({
+        botName: result.bot_name,
+        botPrompt: result.bot_prompt,
+      });
       toast.success('机器人配置已保存');
       setOpen(false);
     } catch (error) {

@@ -421,6 +421,7 @@ export default function ChatRoomPage() {
                   type: updatedRoom.type,
                   is_default: updatedRoom.is_default,
                   bot_name: updatedRoom.bot_name,
+                  bot_prompt: updatedRoom.bot_prompt,
                 }
               : prev
           );
@@ -477,8 +478,16 @@ export default function ChatRoomPage() {
     }
   };
 
-  const handleBotUpdated = (botName: string) => {
-    setRoom((prev) => (prev ? { ...prev, bot_name: botName } : prev));
+  const handleBotUpdated = (config: { botName: string; botPrompt: string }) => {
+    setRoom((prev) =>
+      prev
+        ? {
+            ...prev,
+            bot_name: config.botName,
+            bot_prompt: config.botPrompt,
+          }
+        : prev
+    );
   };
 
   const handleViewDetails = () => {

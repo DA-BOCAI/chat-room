@@ -138,10 +138,20 @@ export function MessageInput({
       const requestMessages: Array<{
         role: 'system' | 'user' | 'assistant';
         content: Array<{ type: 'text'; text: string }>;
-      }> = recentMessages.map((message) => ({
-        role: message.is_ai ? 'assistant' : 'user',
-        content: [{ type: 'text', text: message.content }],
-      }));
+      }> = [
+        ...(currentRoom.bot_prompt?.trim()
+          ? [
+              {
+                role: 'system' as const,
+                content: [{ type: 'text' as const, text: currentRoom.bot_prompt.trim() }],
+              },
+            ]
+          : []),
+        ...recentMessages.map((message) => ({
+          role: (message.is_ai ? 'assistant' : 'user') as 'assistant' | 'user',
+          content: [{ type: 'text' as const, text: message.content }],
+        })),
+      ];
 
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -153,7 +163,6 @@ export function MessageInput({
         requestBody: {
           messages: requestMessages,
           roomId,
-          useRoomBotPrompt: true,
         },
         supabaseAnonKey,
         authToken: accessToken,

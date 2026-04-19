@@ -90,7 +90,7 @@ export async function deleteRoom(roomId: string) {
 export async function getRoomById(roomId: string): Promise<Room | null> {
   const { data, error } = await supabase
     .from('rooms')
-    .select('id,name,type,password,creator_id,is_default,bot_name,created_at')
+    .select('id,name,type,password,creator_id,is_default,bot_name,bot_prompt,created_at')
     .eq('id', roomId)
     .maybeSingle();
 
@@ -395,7 +395,10 @@ export async function updateRoomBotConfig(roomId: string, botName: string, botPr
 
   const { error: roomUpdateError } = await supabase
     .from('rooms')
-    .update({ bot_name: trimmedBotName })
+    .update({
+      bot_name: trimmedBotName,
+      bot_prompt: trimmedBotPrompt,
+    })
     .eq('id', roomId)
     .eq('creator_id', user.user.id)
     .eq('is_default', false);

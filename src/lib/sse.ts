@@ -68,6 +68,7 @@ export interface StreamRequestOptions {
   functionUrl: string;
   requestBody: any;
   supabaseAnonKey: string;
+  authToken?: string;
   onData: (data: string) => void;
   onComplete: () => void;
   onError: (error: Error) => void;
@@ -79,6 +80,7 @@ export const sendStreamRequest = async (options: StreamRequestOptions): Promise<
     functionUrl,
     requestBody,
     supabaseAnonKey,
+    authToken,
     onData,
     onComplete,
     onError,
@@ -103,7 +105,7 @@ export const sendStreamRequest = async (options: StreamRequestOptions): Promise<
     await ky.post(functionUrl, {
       json: requestBody,
       headers: {
-        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'Authorization': `Bearer ${authToken || supabaseAnonKey}`,
         'apikey': supabaseAnonKey,
         'Content-Type': 'application/json'
       },

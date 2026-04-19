@@ -51,8 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     isMounted.current = true;
-    supabase
-      .auth
+    supabase.auth
       .getSession()
       // @ts-ignore
       .then(({ data: { session } }) => {
@@ -75,7 +74,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     // @ts-ignore
     // In this function, do NOT use any await calls. Use `.then()` instead to avoid deadlocks.
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!isMounted.current) return;
       setUser(session?.user ?? null);
       if (session?.user) {
@@ -94,21 +95,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signInWithUsername = async (username: string, password: string) => {
     try {
       const email = `${username}@example.com`;
-      const { error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
       });
 
       if (error) throw error;
 
-      // 直接获取 session 并更新状态，不依赖 onAuthStateChange 回调
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        setUser(session.user);
-        const profileData = await getProfile(session.user.id);
-        if (isMounted.current) {
-          setProfile(profileData);
-        }
+      const signedInUser = data.user ?? data.session?.user;
+      if (!signedInUser) {
+        throw new Error('登录成功，但未获取到用户会话');
+      }
+
+      if (isMounted.current) {
+        setUser(signedInUser);
+      }
+
+      const profileData = await getProfile(signedInUser.id);
+      if (isMounted.current) {
+        setProfile(profileData);
       }
 
       return { error: null };

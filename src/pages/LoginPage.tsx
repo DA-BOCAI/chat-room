@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
@@ -10,12 +10,19 @@ import { toast } from 'sonner';
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { signInWithUsername } = useAuth();
+  const { signInWithUsername, user } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [pendingRedirect, setPendingRedirect] = useState<string | null>(null);
 
   const from = (location.state as { from?: string })?.from || '/lobby';
+
+  useEffect(() => {
+    if (!pendingRedirect || !user) return;
+    navigate(pendingRedirect, { replace: true });
+    setPendingRedirect(null);
+  }, [pendingRedirect, user, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,9 +47,7 @@ export default function LoginPage() {
     }
 
     toast.success('登录成功');
-    // 等待 React 状态更新完成
-    await new Promise(resolve => setTimeout(resolve, 0));
-    navigate(from, { replace: true });
+    setPendingRedirect(from);
   };
 
   return (

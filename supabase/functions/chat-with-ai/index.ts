@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -17,7 +18,66 @@ interface Message {
 
 interface RequestBody {
   messages: Message[];
-  roomId: string;
+  roomId?: string;
+  useRoomBotPrompt?: boolean;
+}
+
+const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
+const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+
+const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+const supabasePublic = createClient(supabaseUrl, supabaseAnonKey);
+
+async function verifyRoomMember(roomId: string, authorization: string | null): Promise<string | null> {
+  if (!authorization?.startsWith('Bearer ')) {
+    return null;
+  }
+
+  const token = authorization.replace('Bearer ', '');
+  const { data: userData, error: userError } = await supabasePublic.auth.getUser(token);
+  if (userError || !userData.user) {
+    return null;
+  }
+
+  const { data: member } = await supabaseAdmin
+    .from('room_members')
+    .select('id')
+    .eq('room_id', roomId)
+    .eq('user_id', userData.user.id)
+    .maybeSingle();
+
+  if (!member) {
+    return null;
+  }
+
+  return userData.user.id;
+}
+
+async function buildMessagesWithRoomPrompt(roomId: string, messages: Message[]): Promise<Message[]> {
+  const { data: room } = await supabaseAdmin
+    .from('rooms')
+    .select('bot_prompt')
+    .eq('id', roomId)
+    .maybeSingle();
+
+  const { data: config } = await supabaseAdmin
+    .from('room_bot_configs')
+    .select('bot_prompt')
+    .eq('room_id', roomId)
+    .maybeSingle();
+
+  const effectivePrompt = config?.bot_prompt || room?.bot_prompt || '';
+  if (!effectivePrompt) {
+    return messages;
+  }
+
+  const systemMessage: Message = {
+    role: 'system',
+    content: [{ type: 'text', text: effectivePrompt }],
+  };
+
+  return [systemMessage, ...messages];
 }
 
 Deno.serve(async (req) => {
@@ -27,7 +87,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { messages, roomId }: RequestBody = await req.json();
+    const { messages, roomId, useRoomBotPrompt }: RequestBody = await req.json();
 
     if (!messages || messages.length === 0) {
       return new Response(
@@ -37,6 +97,22 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
         }
       );
+    }
+
+    let finalMessages = messages;
+    if (useRoomBotPrompt && roomId) {
+      const userId = await verifyRoomMember(roomId, req.headers.get('Authorization'));
+      if (!userId) {
+        return new Response(
+          JSON.stringify({ error: '无权访问该房间机器人' }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          }
+        );
+      }
+
+      finalMessages = await buildMessagesWithRoomPrompt(roomId, messages);
     }
 
     // 获取API密钥
@@ -61,7 +137,7 @@ Deno.serve(async (req) => {
         'X-Gateway-Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        messages,
+        messages: finalMessages,
         enable_thinking: false,
       }),
     });

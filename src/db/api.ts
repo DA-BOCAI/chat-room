@@ -1,13 +1,18 @@
 import { supabase } from './supabase';
 import type { Room, Message, RoomMember } from '@/types/types';
 
+interface OwnerBotConfig {
+  bot_name: string;
+  bot_prompt: string;
+}
+
 // ==================== 房间相关 ====================
 
 // 获取所有房间列表（包含在线人数）
 export async function getRooms(): Promise<Room[]> {
   const { data, error } = await supabase
     .from('rooms')
-    .select('*')
+    .select('id,name,type,password,creator_id,is_default,bot_name,created_at')
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -52,7 +57,7 @@ export async function createRoom(name: string, type: 'public' | 'private', passw
       password: password || null,
       creator_id: user.user.id,
     })
-    .select()
+    .select('id,name,type,password,creator_id,is_default,bot_name,created_at')
     .single();
 
   if (error) throw error;
@@ -85,7 +90,7 @@ export async function deleteRoom(roomId: string) {
 export async function getRoomById(roomId: string): Promise<Room | null> {
   const { data, error } = await supabase
     .from('rooms')
-    .select('*')
+    .select('id,name,type,password,creator_id,is_default,bot_name,created_at')
     .eq('id', roomId)
     .maybeSingle();
 
@@ -258,7 +263,7 @@ export async function sendMessage(
   isAi: boolean = false,
   isWarning: boolean = false,
   createdAt?: string
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; created_at: string } | null> {
   const { data: user } = await supabase.auth.getUser();
   if (!user.user) {
     throw new Error('未登录');
@@ -283,7 +288,7 @@ export async function sendMessage(
       is_warning: isWarning,
       ...(createdAt && { created_at: createdAt }),
     })
-    .select('id')
+    .select('id,created_at')
     .single();
 
   if (error) throw error;
@@ -308,4 +313,110 @@ export async function updateMessage(messageId: string, content: string) {
     .eq('id', messageId);
 
   if (error) throw error;
+}
+
+// ==================== 机器人配置（仅房主） ====================
+
+export async function getRoomBotConfigForOwner(roomId: string): Promise<OwnerBotConfig> {
+  const { data: user } = await supabase.auth.getUser();
+  if (!user.user) {
+    throw new Error('未登录');
+  }
+
+  const { data: room, error: roomError } = await supabase
+    .from('rooms')
+    .select('creator_id,is_default,bot_name')
+    .eq('id', roomId)
+    .maybeSingle();
+
+  if (roomError || !room) {
+    throw new Error('房间不存在');
+  }
+
+  if (room.creator_id !== user.user.id) {
+    throw new Error('只有房主可以查看机器人提示词');
+  }
+
+  if (room.is_default) {
+    throw new Error('默认房间不支持修改机器人配置');
+  }
+
+  const { data: botConfig } = await supabase
+    .from('room_bot_configs')
+    .select('bot_prompt')
+    .eq('room_id', roomId)
+    .maybeSingle();
+
+  return {
+    bot_name: room.bot_name || '',
+    bot_prompt: botConfig?.bot_prompt || '',
+  };
+}
+
+export async function updateRoomBotConfig(roomId: string, botName: string, botPrompt: string): Promise<OwnerBotConfig> {
+  const { data: user } = await supabase.auth.getUser();
+  if (!user.user) {
+    throw new Error('未登录');
+  }
+
+  const trimmedBotName = botName.trim();
+  const trimmedBotPrompt = botPrompt.trim();
+
+  if (!trimmedBotName) {
+    throw new Error('机器人名称不能为空');
+  }
+  if (trimmedBotName.length > 20) {
+    throw new Error('机器人名称不能超过20个字符');
+  }
+  if (!trimmedBotPrompt) {
+    throw new Error('提示词不能为空');
+  }
+  if (trimmedBotPrompt.length > 4000) {
+    throw new Error('提示词不能超过4000个字符');
+  }
+
+  const { data: room, error: roomError } = await supabase
+    .from('rooms')
+    .select('creator_id,is_default')
+    .eq('id', roomId)
+    .maybeSingle();
+
+  if (roomError || !room) {
+    throw new Error('房间不存在');
+  }
+
+  if (room.creator_id !== user.user.id) {
+    throw new Error('只有房主可以修改机器人配置');
+  }
+
+  if (room.is_default) {
+    throw new Error('默认房间不支持修改机器人配置');
+  }
+
+  const { error: roomUpdateError } = await supabase
+    .from('rooms')
+    .update({ bot_name: trimmedBotName })
+    .eq('id', roomId)
+    .eq('creator_id', user.user.id)
+    .eq('is_default', false);
+
+  if (roomUpdateError) {
+    throw roomUpdateError;
+  }
+
+  const { error: configError } = await supabase
+    .from('room_bot_configs')
+    .upsert({
+      room_id: roomId,
+      bot_prompt: trimmedBotPrompt,
+    }, { onConflict: 'room_id' });
+
+  if (configError) {
+    throw configError;
+  }
+
+  return {
+    bot_name: trimmedBotName,
+    bot_prompt: trimmedBotPrompt,
+  };
 }

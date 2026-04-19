@@ -1,8 +1,14 @@
-import { useEffect, useState, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, Loader2, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
+import { MessageInput } from '@/components/chat/MessageInput';
+import { MessageList } from '@/components/chat/MessageList';
+import { MessageSummary } from '@/components/chat/MessageSummary';
+import { OnlineUserList } from '@/components/chat/OnlineUserList';
+import { RoomBotSettingsDialog } from '@/components/chat/RoomBotSettingsDialog';
 import { Button } from '@/components/ui/button';
-import { ArrowLeft, Trash2, Loader2 } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -14,39 +20,24 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { toast } from 'sonner';
 import {
+  checkUserRoomStatus,
+  deleteRoom,
   getRoomById,
   getRoomMembers,
   getRoomMessages,
   leaveRoom,
-  deleteRoom,
-  checkUserRoomStatus,
 } from '@/db/api';
 import { supabase } from '@/db/supabase';
-import type { Room, RoomMember, Message, Profile } from '@/types/types';
-import { MessageList } from '@/components/chat/MessageList';
-import { MessageInput } from '@/components/chat/MessageInput';
-import { OnlineUserList } from '@/components/chat/OnlineUserList';
-import { MessageSummary } from '@/components/chat/MessageSummary';
+import {
+  confirmTempMessage,
+  mergeHydratedMessages,
+  readCachedRoomMessages,
+  reconcileIncomingMessage,
+  writeCachedRoomMessages,
+} from '@/lib/chatMessages';
+import type { Message, Profile, Room, RoomMember } from '@/types/types';
 
-// 二分查找插入位置（假设 messages 按 created_at 升序）
-function binarySearchInsert(messages: Message[], newTime: number): number {
-  let left = 0;
-  let right = messages.length;
-  while (left < right) {
-    const mid = Math.floor((left + right) / 2);
-    const msgTime = new Date(messages[mid].created_at).getTime();
-    if (msgTime < newTime) {
-      left = mid + 1;
-    } else {
-      right = mid;
-    }
-  }
-  return left;
-}
-
-// 获取未读消息的辅助函数
 async function getUnreadMessages(roomId: string, lastSeen: string) {
   const { data, error } = await supabase
     .from('messages')
@@ -55,7 +46,10 @@ async function getUnreadMessages(roomId: string, lastSeen: string) {
     .gt('created_at', lastSeen)
     .order('created_at', { ascending: true });
 
-  if (error) return [];
+  if (error) {
+    return [];
+  }
+
   return data || [];
 }
 
@@ -77,24 +71,21 @@ export default function ChatRoomPage() {
   const [summaryData, setSummaryData] = useState<SummaryData | null>(null);
   const [showSummary, setShowSummary] = useState(false);
   const [loadingSummary, setLoadingSummary] = useState(false);
-  const messageListRef = useRef<HTMLDivElement>(null);
-
-  // Profile 缓存
   const profileCacheRef = useRef<Map<string, Profile>>(new Map());
 
-  // 初始化 profile 缓存
-  const initProfileCache = (msgs: Message[]) => {
-    msgs.forEach(msg => {
-      if (msg.profile && !profileCacheRef.current.has(msg.user_id)) {
-        profileCacheRef.current.set(msg.user_id, msg.profile);
+  const initProfileCache = (nextMessages: Message[]) => {
+    for (const message of nextMessages) {
+      if (message.profile && !profileCacheRef.current.has(message.user_id)) {
+        profileCacheRef.current.set(message.user_id, message.profile);
       }
-    });
+    }
   };
 
-  // 获取 profile（先查缓存）
   const getProfile = async (userId: string): Promise<Profile | null> => {
     const cached = profileCacheRef.current.get(userId);
-    if (cached) return cached;
+    if (cached) {
+      return cached;
+    }
 
     const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
     if (data) {
@@ -103,157 +94,185 @@ export default function ChatRoomPage() {
     return data;
   };
 
-  // 更新消息内容（用于AI流式更新）
   const updateMessageContent = (messageId: string, content: string) => {
-    setMessages(prev => prev.map(msg =>
-      msg.id === messageId ? { ...msg, content } : msg
-    ));
+    setMessages((prev) =>
+      prev.map((message) => (message.id === messageId ? { ...message, content } : message))
+    );
   };
 
-  // 删除消息（用于审核失败后删除）
   const removeMessage = (messageId: string) => {
-    setMessages(prev => prev.filter(msg => msg.id !== messageId));
+    setMessages((prev) => prev.filter((message) => message.id !== messageId));
   };
 
-  // 添加临时消息（用于AI流式显示）
   const addTempMessage = (message: Message) => {
-    setMessages(prev => [...prev, message]);
+    setMessages((prev) => reconcileIncomingMessage(prev, message));
   };
 
-  // 生成消息摘要
+  const confirmMessage = (
+    tempId: string,
+    persisted: {
+      id: string;
+      created_at?: string;
+      content?: string;
+    }
+  ) => {
+    setMessages((prev) => confirmTempMessage(prev, tempId, persisted));
+  };
+
   const generateSummary = async (lastSeen: string) => {
-    if (!roomId || !user?.id) return;
+    if (!roomId || !user?.id) {
+      return;
+    }
 
     setLoadingSummary(true);
-    try {
-      // 1. 获取未读消息
-      const messages = await getUnreadMessages(roomId, lastSeen);
 
-      if (!messages || messages.length === 0) {
-        console.log('没有未读消息');
+    try {
+      const unreadMessages = await getUnreadMessages(roomId, lastSeen);
+      if (unreadMessages.length === 0) {
         return;
       }
 
-      // 2. 构建消息文本
-      const messageTexts = messages.map((msg: any) => {
-        const username = msg.profile?.username || '未知用户';
-        return `${username}: ${msg.content}`;
-      }).join('\n');
+      const messageText = unreadMessages
+        .map((message: any) => {
+          const username = message.profile?.username || '未知用户';
+          return `${username}: ${message.content}`;
+        })
+        .join('\n');
 
-      // 3. 调用 AI API
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
       const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-      const apiUrl = `${supabaseUrl}/functions/v1/chat-with-ai`;
-
-      const response = await fetch(apiUrl, {
+      const response = await fetch(`${supabaseUrl}/functions/v1/chat-with-ai`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${supabaseAnonKey}`,
-          'Content-Type': 'application/json'
+          Authorization: `Bearer ${supabaseAnonKey}`,
+          'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          messages: [{
-            role: 'user',
-            content: [{ type: 'text', text: `请总结以下聊天记录，简洁明了（3-5句）：\n${messageTexts}` }]
-          }],
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: `请用 3 到 5 句话简洁总结以下聊天记录：\n${messageText}`,
+                },
+              ],
+            },
+          ],
           enable_thinking: false,
         }),
       });
 
-      if (!response.ok) {
-        console.error('AI摘要失败:', response.statusText);
+      if (!response.ok || !response.body) {
         return;
       }
 
-      // 4. 解析 SSE 流式响应
-      const reader = response.body?.getReader();
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let summaryText = '';
 
-      while (reader) {
+      while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          break;
+        }
+
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n').filter(line => line.trim());
+        const lines = chunk.split('\n').filter(Boolean);
+
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') continue;
-            try {
-              const parsed = JSON.parse(data);
-              const content = parsed.choices?.[0]?.delta?.content || '';
-              summaryText += content;
-            } catch (e) { /* ignore */ }
+          if (!line.startsWith('data: ')) {
+            continue;
           }
+
+          const data = line.slice(6);
+          if (data === '[DONE]') {
+            continue;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            summaryText += parsed.choices?.[0]?.delta?.content || '';
+          } catch {}
         }
       }
 
-      // 5. 显示摘要
       setSummaryData({
         summary: summaryText.trim(),
-        unreadCount: messages.length,
+        unreadCount: unreadMessages.length,
         hasUnread: true,
-        firstUnreadTime: messages[0].created_at
+        firstUnreadTime: unreadMessages[0].created_at,
       });
-      setShowSummary(true);
-      console.log('显示摘要面板');
-
+      setShowSummary(Boolean(summaryText.trim()));
     } catch (error) {
-      console.error('生成摘要失败:', error);
+      console.error('生成消息摘要失败:', error);
     } finally {
       setLoadingSummary(false);
     }
   };
 
   const loadRoomData = async () => {
-    if (!roomId) return;
-
-    // 并行检查用户房间状态
-    const { inRoom, lastSeen } = await checkUserRoomStatus(roomId);
-    console.log('用户最后查看时间:', lastSeen);
-
-    if (!inRoom) {
-      toast.error('您不在该房间中');
-      navigate('/lobby');
+    if (!roomId) {
       return;
     }
 
-    // 并行获取房间、成员、消息数据
-    const [roomData, membersData, messagesData] = await Promise.all([
-      getRoomById(roomId),
-      getRoomMembers(roomId),
-      getRoomMessages(roomId),
-    ]);
+    try {
+      const cachedMessages = readCachedRoomMessages(roomId);
+      if (cachedMessages.length > 0) {
+        setMessages(cachedMessages);
+        initProfileCache(cachedMessages);
+      }
 
-    setRoom(roomData);
-    setMembers(new Map(membersData.map(m => [m.user_id, m])));
-    setMessages(messagesData);
+      const { inRoom, lastSeen } = await checkUserRoomStatus(roomId);
+      if (!inRoom) {
+        toast.error('您不在该房间中');
+        navigate('/lobby');
+        return;
+      }
 
-    // 初始化 profile 缓存
-    initProfileCache(messagesData);
+      const [roomData, membersData, serverMessages] = await Promise.all([
+        getRoomById(roomId),
+        getRoomMembers(roomId),
+        getRoomMessages(roomId),
+      ]);
 
-    setLoading(false);
+      const hydratedMessages = mergeHydratedMessages(cachedMessages, serverMessages);
 
-    // 检查是否需要生成摘要 - 只有之前离开过房间才生成摘要
-    const lastLeftStr = sessionStorage.getItem(`last_left_${roomId}`);
-    if (lastLeftStr) {
-      console.log('触发智能总结（基于 sessionStorage）');
-      await generateSummary(lastLeftStr);
-      sessionStorage.removeItem(`last_left_${roomId}`);
-    } else if (lastSeen) {
-      console.log('触发智能总结（基于数据库 last_seen）');
-      await generateSummary(lastSeen);
-    } else {
-      console.log('首次进入房间，跳过摘要生成');
+      setRoom(roomData);
+      setMembers(new Map(membersData.map((member) => [member.user_id, member])));
+      setMessages(hydratedMessages);
+      initProfileCache(hydratedMessages);
+      setLoading(false);
+
+      const lastLeftAt = sessionStorage.getItem(`last_left_${roomId}`);
+      if (lastLeftAt) {
+        await generateSummary(lastLeftAt);
+        sessionStorage.removeItem(`last_left_${roomId}`);
+      } else if (lastSeen) {
+        await generateSummary(lastSeen);
+      }
+    } catch (error) {
+      console.error('加载房间数据失败:', error);
+      toast.error('加载房间失败，请稍后重试');
+      navigate('/lobby');
     }
   };
 
   useEffect(() => {
-    loadRoomData();
+    if (!roomId) {
+      return;
+    }
 
-    if (!roomId) return;
+    writeCachedRoomMessages(roomId, messages);
+  }, [roomId, messages]);
 
-    // 订阅消息变化（优化：O(1) 追加 + profile 缓存）
+  useEffect(() => {
+    void loadRoomData();
+
+    if (!roomId) {
+      return;
+    }
+
     const messagesChannel = supabase
       .channel(`room-messages-${roomId}`)
       .on(
@@ -265,56 +284,20 @@ export default function ChatRoomPage() {
           filter: `room_id=eq.${roomId}`,
         },
         async (payload) => {
-          const newMessage = payload.new as Message;
-          if (newMessage && newMessage.room_id === roomId) {
-            // 先查缓存获取 profile
-            const profile = await getProfile(newMessage.user_id);
-
-            setMessages(prev => {
-              // 检查是否是临时消息需要替换
-              const tempIndex = prev.findIndex(m => m.id.startsWith('temp-') || m.id.startsWith('ai-temp-'));
-              if (tempIndex !== -1) {
-                // 移除临时消息
-                const withoutTemp = prev.filter((_, index) => index !== tempIndex);
-                const msgWithProfile = { ...newMessage, profile: profile || prev[tempIndex].profile };
-
-                // 优化：直接 push 再排序（大多数情况消息有序）
-                const lastTime = withoutTemp.length > 0
-                  ? new Date(withoutTemp[withoutTemp.length - 1].created_at).getTime()
-                  : 0;
-                const newTime = new Date(msgWithProfile.created_at).getTime();
-
-                if (newTime >= lastTime) {
-                  return [...withoutTemp, msgWithProfile];
-                }
-
-                // 乱序情况用二分查找
-                const insertIndex = binarySearchInsert(withoutTemp, newTime);
-                const updated = [...withoutTemp];
-                updated.splice(insertIndex, 0, msgWithProfile);
-                return updated;
-              }
-
-              // 非临时消息：优化插入
-              const lastTime = prev.length > 0
-                ? new Date(prev[prev.length - 1].created_at).getTime()
-                : 0;
-              const newTime = new Date(newMessage.created_at).getTime();
-
-              if (newTime >= lastTime) {
-                return [...prev, { ...newMessage, profile: profile || undefined }];
-              }
-
-              // 乱序情况用二分查找
-              const insertIndex = binarySearchInsert(prev, newTime);
-              const updated = [...prev];
-              updated.splice(insertIndex, 0, { ...newMessage, profile: profile || undefined });
-              return updated;
-            });
+          const incomingMessage = payload.new as Message;
+          if (!incomingMessage || incomingMessage.room_id !== roomId) {
+            return;
           }
+
+          const profile = await getProfile(incomingMessage.user_id);
+          setMessages((prev) =>
+            reconcileIncomingMessage(prev, {
+              ...incomingMessage,
+              profile: profile || undefined,
+            })
+          );
         }
       )
-      // 监听消息删除（审核不通过时消息被删除，UI 自动移除）
       .on(
         'postgres_changes',
         {
@@ -325,12 +308,11 @@ export default function ChatRoomPage() {
         },
         (payload) => {
           const deletedId = (payload.old as { id: string }).id;
-          setMessages(prev => prev.filter(m => m.id !== deletedId));
+          setMessages((prev) => prev.filter((message) => message.id !== deletedId));
         }
       )
       .subscribe();
 
-    // 订阅成员变化（增量更新：只处理 INSERT/DELETE）
     const membersChannel = supabase
       .channel(`room-members-${roomId}`)
       .on(
@@ -342,15 +324,17 @@ export default function ChatRoomPage() {
           filter: `room_id=eq.${roomId}`,
         },
         async (payload) => {
-          const newMember = payload.new as RoomMember;
-          const profile = await getProfile(newMember.user_id);
-          if (profile) {
-            setMembers(prev => {
-              const next = new Map(prev);
-              next.set(newMember.user_id, { ...newMember, profile });
-              return next;
-            });
+          const member = payload.new as RoomMember;
+          const profile = await getProfile(member.user_id);
+          if (!profile) {
+            return;
           }
+
+          setMembers((prev) => {
+            const next = new Map(prev);
+            next.set(member.user_id, { ...member, profile });
+            return next;
+          });
         }
       )
       .on(
@@ -361,23 +345,26 @@ export default function ChatRoomPage() {
           table: 'room_members',
           filter: `room_id=eq.${roomId}`,
         },
-        (payload) => {
-          const updated = payload.new as RoomMember;
-          // last_seen 非 null 表示用户已离线（退出房间或离开大厅）
-          const isOffline = !!updated.last_seen;
+        async (payload) => {
+          const member = payload.new as RoomMember;
 
-          setMembers(prev => {
+          if (member.last_seen) {
+            setMembers((prev) => {
+              const next = new Map(prev);
+              next.delete(member.user_id);
+              return next;
+            });
+            return;
+          }
+
+          const profile = await getProfile(member.user_id);
+          if (!profile) {
+            return;
+          }
+
+          setMembers((prev) => {
             const next = new Map(prev);
-            if (isOffline) {
-              next.delete(updated.user_id);
-            } else {
-              // last_seen 为 null，表示用户在线，更新成员信息
-              getProfile(updated.user_id).then(profile => {
-                if (profile) {
-                  setMembers(p => new Map(p).set(updated.user_id, { ...updated, profile }));
-                }
-              });
-            }
+            next.set(member.user_id, { ...member, profile });
             return next;
           });
         }
@@ -390,10 +377,8 @@ export default function ChatRoomPage() {
           table: 'room_members',
         },
         (payload) => {
-          // DELETE 事件在未设置 REPLICA IDENTITY FULL 时，old 可能只有主键 id。
-          // 优先用 user_id 删除，缺失时回退为按 member id 在本地 Map 中反查并删除。
           const oldRow = payload.old as { id?: string; user_id?: string };
-          setMembers(prev => {
+          setMembers((prev) => {
             const next = new Map(prev);
 
             if (oldRow.user_id) {
@@ -416,9 +401,31 @@ export default function ChatRoomPage() {
       )
       .subscribe();
 
-    // 订阅房间删除
     const roomChannel = supabase
       .channel(`room-${roomId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'rooms',
+          filter: `id=eq.${roomId}`,
+        },
+        (payload) => {
+          const updatedRoom = payload.new as Room;
+          setRoom((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  name: updatedRoom.name,
+                  type: updatedRoom.type,
+                  is_default: updatedRoom.is_default,
+                  bot_name: updatedRoom.bot_name,
+                }
+              : prev
+          );
+        }
+      )
       .on(
         'postgres_changes',
         {
@@ -442,10 +449,11 @@ export default function ChatRoomPage() {
   }, [roomId, navigate]);
 
   const handleLeaveRoom = async () => {
-    if (!roomId) return;
+    if (!roomId) {
+      return;
+    }
 
     try {
-      // 保存离开时间到 sessionStorage，用于智能摘要功能
       sessionStorage.setItem(`last_left_${roomId}`, new Date().toISOString());
       await leaveRoom(roomId);
       toast.success('已退出房间');
@@ -456,7 +464,9 @@ export default function ChatRoomPage() {
   };
 
   const handleDeleteRoom = async () => {
-    if (!roomId) return;
+    if (!roomId) {
+      return;
+    }
 
     try {
       await deleteRoom(roomId);
@@ -467,44 +477,47 @@ export default function ChatRoomPage() {
     }
   };
 
-  // 滚动到未读消息位置
-  const handleViewDetails = () => {
-    if (!summaryData?.firstUnreadTime) return;
-    
-    // 找到第一条未读消息的索引
-    const firstUnreadIndex = messages.findIndex(
-      msg => new Date(msg.created_at).getTime() >= new Date(summaryData.firstUnreadTime!).getTime()
-    );
-    
-    if (firstUnreadIndex !== -1) {
-      // 滚动到该消息
-      const messageElements = document.querySelectorAll('[data-message-id]');
-      if (messageElements[firstUnreadIndex]) {
-        messageElements[firstUnreadIndex].scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    }
-    
-    // 关闭摘要面板
-    setShowSummary(false);
+  const handleBotUpdated = (botName: string) => {
+    setRoom((prev) => (prev ? { ...prev, bot_name: botName } : prev));
   };
 
-  const handleCloseSummary = () => {
+  const handleViewDetails = () => {
+    if (!summaryData?.firstUnreadTime) {
+      return;
+    }
+
+    const firstUnreadIndex = messages.findIndex(
+      (message) =>
+        new Date(message.created_at).getTime() >=
+        new Date(summaryData.firstUnreadTime as string).getTime()
+    );
+
+    if (firstUnreadIndex !== -1) {
+      const messageElements = document.querySelectorAll('[data-message-id]');
+      if (messageElements[firstUnreadIndex]) {
+        messageElements[firstUnreadIndex].scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      }
+    }
+
     setShowSummary(false);
   };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="h-12 w-12 animate-spin rounded-full border-b-2 border-primary" />
       </div>
     );
   }
 
   if (!room) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
+      <div className="flex min-h-screen items-center justify-center">
         <div className="text-center">
-          <p className="text-muted-foreground mb-4">房间不存在</p>
+          <p className="mb-4 text-muted-foreground">房间不存在</p>
           <Button onClick={() => navigate('/lobby')}>返回大厅</Button>
         </div>
       </div>
@@ -512,27 +525,39 @@ export default function ChatRoomPage() {
   }
 
   const isCreator = user?.id === room.creator_id;
-  const canDelete = isCreator && !room.is_default; // 只有创建者且非默认房间才能解散
+  const canDelete = isCreator && !room.is_default;
 
   return (
-    <div className="flex flex-col h-screen bg-background">
-      {/* 顶部导航栏 */}
-      <header className="border-b border-border bg-card px-4 py-3 flex items-center justify-between">
+    <div className="flex h-screen flex-col bg-background">
+      <header className="flex items-center justify-between border-b border-border bg-card px-4 py-3">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={() => {
-            if (roomId) {
-              sessionStorage.setItem(`last_left_${roomId}`, new Date().toISOString());
-            }
-            navigate('/lobby');
-          }}>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              if (roomId) {
+                sessionStorage.setItem(`last_left_${roomId}`, new Date().toISOString());
+              }
+              navigate('/lobby');
+            }}
+          >
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
             <h1 className="font-semibold text-foreground">{room.name}</h1>
-            <p className="text-xs text-muted-foreground">{members.size}人在线</p>
+            <p className="text-xs text-muted-foreground">{members.size} 人在线</p>
           </div>
         </div>
+
         <div className="flex items-center gap-2">
+          {isCreator && !room.is_default && (
+            <RoomBotSettingsDialog
+              roomId={roomId || ''}
+              currentBotName={room.bot_name}
+              onUpdated={handleBotUpdated}
+            />
+          )}
+
           {canDelete ? (
             <AlertDialog>
               <AlertDialogTrigger asChild>
@@ -545,12 +570,15 @@ export default function ChatRoomPage() {
                 <AlertDialogHeader>
                   <AlertDialogTitle>确认解散房间？</AlertDialogTitle>
                   <AlertDialogDescription>
-                    解散后，房间内所有用户将被移出，历史消息将被清空，此操作不可恢复。
+                    解散后，房间内成员会被移出，历史消息也会被清空，此操作不可恢复。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel>取消</AlertDialogCancel>
-                  <AlertDialogAction onClick={handleDeleteRoom} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                  <AlertDialogAction
+                    onClick={handleDeleteRoom}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
                     确认解散
                   </AlertDialogAction>
                 </AlertDialogFooter>
@@ -564,11 +592,13 @@ export default function ChatRoomPage() {
         </div>
       </header>
 
-      {/* 主体区域 */}
       <div className="flex flex-1 overflow-hidden">
-        {/* 消息区域 */}
-        <div className="flex-1 flex flex-col">
-          <MessageList messages={messages} currentUserId={user?.id || ''} botName={room.bot_name} />
+        <div className="flex flex-1 flex-col">
+          <MessageList
+            messages={messages}
+            currentUserId={user?.id || ''}
+            botName={room.bot_name}
+          />
           <MessageInput
             roomId={roomId || ''}
             room={room}
@@ -576,33 +606,31 @@ export default function ChatRoomPage() {
             onUpdateMessage={updateMessageContent}
             onDeleteMessage={removeMessage}
             onAddTempMessage={addTempMessage}
+            onConfirmMessage={confirmMessage}
           />
         </div>
 
-        {/* 右侧边栏 */}
-        <div className="w-80 border-l border-border bg-card flex flex-col">
-          {/* 摘要面板 */}
+        <div className="flex w-80 flex-col border-l border-border bg-card">
           {loadingSummary && (
-            <div className="p-4 border-b border-border">
+            <div className="border-b border-border p-4">
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>正在生成消息摘要...</span>
+                <span>正在生成离线消息摘要...</span>
               </div>
             </div>
           )}
-          
-          {showSummary && summaryData && (
-            <div className="p-4 border-b border-border">
+
+          {showSummary && summaryData?.hasUnread && (
+            <div className="border-b border-border p-4">
               <MessageSummary
                 summary={summaryData.summary}
                 unreadCount={summaryData.unreadCount}
                 onViewDetails={handleViewDetails}
-                onClose={handleCloseSummary}
+                onClose={() => setShowSummary(false)}
               />
             </div>
           )}
 
-          {/* 在线用户列表 */}
           <div className="flex-1 overflow-hidden">
             <OnlineUserList members={[...members.values()]} creatorId={room.creator_id} />
           </div>

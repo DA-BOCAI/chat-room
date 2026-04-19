@@ -3,6 +3,7 @@ import { Bot, ShieldAlert } from 'lucide-react';
 import type { Message } from '@/types/types';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
+import { MessageContent } from '@/components/chat/MessageContent';
 
 // 移到组件外部作为纯函数，避免每次渲染重建
 const formatTime = (dateString: string): string => {
@@ -76,6 +77,7 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
             const isOwn = message.user_id === currentUserId;
             const isAI = message.is_ai;
             const isWarning = message.is_warning;
+            const isStreamingAI = Boolean(isAI && message.id.startsWith('ai-temp-'));
             
             // 监管警告消息居中显示
             if (isWarning) {
@@ -88,7 +90,7 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
                       <span>{formatTime(message.created_at)}</span>
                     </div>
                     <div className="px-4 py-2 rounded border border-destructive/50 bg-destructive/10 text-destructive">
-                      <p className="text-sm break-words whitespace-pre-wrap text-center">{message.content}</p>
+                      <MessageContent content={message.content} centered />
                     </div>
                   </div>
                 </div>
@@ -116,7 +118,7 @@ export function MessageList({ messages, currentUserId, botName }: MessageListPro
                         : 'bg-card text-card-foreground border-border'
                     }`}
                   >
-                    <p className="text-sm break-words whitespace-pre-wrap">{message.content}</p>
+                    <MessageContent content={message.content} streaming={isStreamingAI} />
                   </div>
                 </div>
               </div>

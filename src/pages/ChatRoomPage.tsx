@@ -388,14 +388,28 @@ export default function ChatRoomPage() {
           event: 'DELETE',
           schema: 'public',
           table: 'room_members',
-          filter: `room_id=eq.${roomId}`,
         },
         (payload) => {
-          // 从 payload.old 获取离开用户的 user_id
-          const leftUserId = payload.old.user_id;
+          // DELETE 事件在未设置 REPLICA IDENTITY FULL 时，old 可能只有主键 id。
+          // 优先用 user_id 删除，缺失时回退为按 member id 在本地 Map 中反查并删除。
+          const oldRow = payload.old as { id?: string; user_id?: string };
           setMembers(prev => {
             const next = new Map(prev);
-            next.delete(leftUserId);
+
+            if (oldRow.user_id) {
+              next.delete(oldRow.user_id);
+              return next;
+            }
+
+            if (oldRow.id) {
+              for (const [userId, member] of next.entries()) {
+                if (member.id === oldRow.id) {
+                  next.delete(userId);
+                  break;
+                }
+              }
+            }
+
             return next;
           });
         }
